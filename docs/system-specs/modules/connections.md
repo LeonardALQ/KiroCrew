@@ -8,6 +8,11 @@ disconnect, and the two launch-gate rungs. The subsystem is
 `l0_record.py`, `l1_smoke.py`, `tool_test.py`), plus
 `dashboard/handlers/connections.py` and `website/src/pages/connections/`.
 
+> **Not this document:** a link to another Kiro Crew *gateway* — over SSH, AWS SSM,
+> or this host's own loopback — is the **Remote Instances** feature, owned by
+> [`instances.md`](instances.md) (`connection_method`, §13 and §16). "Connection"
+> here means a third-party ACCOUNT link whose credential kiro-cli holds.
+
 The `src/kiro_crew/connections/vendors/zoom/` subtree is a separate connector-campaign slice with its own owning spec — [connector-zoom.md](connector-zoom.md) (`W11-A` Zoom contract semantics) — not this subsystem's OAuth-grant plumbing.
 
 **Kiro Crew never holds a connection's credential.** kiro-cli owns the OAuth chain
