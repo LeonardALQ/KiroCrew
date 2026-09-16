@@ -253,6 +253,12 @@ def test_session_sharing_is_opt_in() -> None:
     # claude-agent-acp runs one process per session (AcpClient), so it cannot
     # host a multiplexed subagent session however the call site is written.
     assert ACP_BACKEND_CLAUDE not in ACP_BACKENDS_SESSION_SHARING
+    # codex is the case this ratchet exists for: it IS on the shared runtime and
+    # its adapter WOULD hold a shared session, so nothing about the transport
+    # excludes it -- only the continuation, which resolves a codex subagent's
+    # persisted provider label as kiro-cli and answers conversation_gone. A
+    # capability inferred from "runs on AcpRuntime" would have granted it.
+    assert ACP_BACKEND_CODEX not in ACP_BACKENDS_SESSION_SHARING
 
 
 def test_member_capabilities_are_opt_in() -> None:
@@ -646,24 +652,36 @@ def test_only_overlay_readers_are_written_to() -> None:
         ), f"{fn.__name__}: overlay write is not scoped to the overlay's readers"
 
 
-def test_codex_spawn_keeps_its_own_branch() -> None:
-    """H9/H10: codex resolves its own adapter and declares its own handshake.
+def test_codex_resolves_its_own_adapter_and_declares_its_own_handshake() -> None:
+    """H9/H10, on the core that drives codex.
 
-    Falling through to the kiro branch would spawn kiro-cli under a codex label —
-    the exact failure ACP_BACKENDS_KNOWN's rejection exists to prevent one step
-    earlier — and folding its protocol version into the claude literal would make a
-    future divergence a silent downgrade for whichever harness moved first.
+    Resolving the kiro binary instead would spawn kiro-cli under a codex label —
+    the exact failure ``ACP_BACKENDS_KNOWN``'s rejection exists to prevent one step
+    earlier — and folding its protocol version into another harness's literal would
+    make a future divergence a silent downgrade for whichever moved first.
+
+    ONE declaration, on one core. ``AcpClient`` does not drive codex, so it carries
+    no codex protocol literal and no codex row: a second copy on a core that never
+    performs the handshake is a copy nothing keeps honest, and the second half of
+    this test is what stops one growing back.
     """
-    spawn_source = inspect.getsource(acp_client.AcpClient._spawn)
-    assert "_is_codex" in spawn_source
+    from kiro_crew.acp.harness import codex as codex_harness
+
+    spawn_source = inspect.getsource(codex_harness.CodexHarness.resolve_spawn)
     assert "_resolve_codex_acp_bin" in spawn_source
-    assert acp_client.PROTOCOL_VERSION_CODEX is not None
-    # Its OWN literal, read from the per-harness table the handshake looks up. The
-    # table is what keeps the shared handshake free of adapter conditionals (H13);
-    # the entry being codex's own name rather than claude's is what keeps a future
-    # divergence a one-row edit rather than a silent downgrade (H10).
-    table = acp_client._PROTOCOL_VERSION_BY_BACKEND
-    assert table[ACP_BACKEND_CODEX] is acp_client.PROTOCOL_VERSION_CODEX
+    assert "codex_acp_not_found_message" in spawn_source
+
+    # Its OWN literal, returned by its own seam rather than inherited.
+    assert codex_harness.PROTOCOL_VERSION_CODEX is not None
+    assert (
+        inspect.getsource(codex_harness.CodexHarness.protocol_version.fget)
+        .strip()
+        .endswith("PROTOCOL_VERSION_CODEX")
+    )
+
+    # And the client core carries neither the constant nor a row for codex.
+    assert not hasattr(acp_client, "PROTOCOL_VERSION_CODEX")
+    assert ACP_BACKEND_CODEX not in acp_client._PROTOCOL_VERSION_BY_BACKEND
     assert "_PROTOCOL_VERSION_BY_BACKEND" in inspect.getsource(
         acp_client.AcpClient._initialize_session
     )
@@ -673,11 +691,12 @@ def test_each_mcp_seam_is_spliced_only_for_its_own_harness() -> None:
     """H6: a per-harness hook must not reach a session of a different harness.
 
     Both defaults return ``[]``, so an ungated splice is inert in this tree — but an
-    edition that overrides both hooks would hand a claude session codex's server
-    entries and vice versa, and an entry whose transport the adapter does not
-    advertise fails the whole ``session/new`` rather than being skipped. Pinned at
-    the source, in the file's existing idiom, because the splice sits inside an
-    async session-setup path with no unit-level seam.
+    edition that overrides both hooks would hand one harness's session another's
+    server entries, and the cost differs by harness: opencode fails the whole
+    ``session/new`` with ``-32602``, while a host that validates nothing accepts the
+    entry and leaves a server silently unwired. Pinned at the source, in the file's
+    existing idiom, because the splice sits inside an async session-setup path with
+    no unit-level seam.
     """
     for fn in (
         acp_client.AcpClient._new_session_following_substitution,
@@ -704,13 +723,15 @@ def test_codex_mcp_seam_projects_through_its_mirror() -> None:
     selectable public backend would serve sessions with no ``spawn_run``, no
     ``cron_add``, no ``send_message`` and no error anywhere.
 
-    What this pins is WHERE the array comes from. A translator written here rather
-    than in ``providers/mirrors/codex.py`` is the shape the mirror folder exists to
-    stop: one per-harness override per author, each rediscovering the same
-    projection.
+    What this pins is WHERE the array comes from. A translator written on the
+    harness rather than in ``providers/mirrors/codex.py`` is the shape the mirror
+    folder exists to stop: one per-harness override per author, each rediscovering
+    the same projection.
     """
-    source = inspect.getsource(acp_client.AcpClient._codex_session_mcp_servers)
-    assert "self._session_mcp_servers()" in source
+    from kiro_crew.acp.harness import codex as codex_harness
+
+    source = inspect.getsource(codex_harness.CodexHarness.session_mcp_servers)
+    assert "drop_unadvertised_transports" in source
     assert acp_backends.ACP_BACKEND_CODEX in acp_backends.ACP_BACKENDS_SESSION_MCP_ARRAY
     assert mirrors.mirror_for(acp_backends.ACP_BACKEND_CODEX) is not None
 

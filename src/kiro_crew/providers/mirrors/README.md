@@ -214,11 +214,18 @@ a tool they switched off answers anyway.
 Codex is the reason this section exists. Its hook sat at `[]` behind a docstring
 that stated, as the one established constraint, that codex-acp answers `-32602`
 for the whole `session/new` when it meets a transport it does not advertise. A
-real adapter says otherwise: a malformed stdio element — and even an array member
-that is not an object — leaves `session/new` succeeding with that element
-dropped, while `sse` is the one fatal shape and fails with `-32600`. The fear was
-the wrong code AND the wrong scope, and it had been load-bearing for a whole
-harness's tool surface.
+real adapter refuses none of it. A malformed stdio element — and even an array
+member that is not an object — leaves `session/new` succeeding with that element
+dropped; an `sse` element the adapter's own `mcpCapabilities` marks unsupported
+leaves `session/new` succeeding too, with that server accepted and never wired,
+exactly as a deliberately meaningless `{"type": "nonsense-type"}` control does.
+So the fear was wrong in its code, its scope AND its direction, and the direction
+is the expensive half: a harness that fails OPEN hands a client a healthy session
+with a silently missing tool, which nothing downstream reports. Client-side
+transport narrowing is therefore not a defence against a fatal refusal — it is
+the only guard that the array Crew sends is the array the adapter honours, and
+that argument had been load-bearing for a whole harness's tool surface in the
+opposite direction.
 
 So a new mirror's transport and environment rules are MEASURED. `codex.py` cites
 what was run and `test/test_codex_session_mcp.py` pins it against an installed

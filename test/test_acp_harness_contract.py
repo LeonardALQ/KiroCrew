@@ -683,11 +683,61 @@ def test_no_host_is_left_unverified(backend):
 # ── Seam 9: reclaim ──
 
 
+#: Harnesses whose Seam 9 answer is NOT the operator's configuration, and the answer
+#: each gives. Declared by name so a new override is an edit here rather than a
+#: silent change of what an operator's ceiling means for one host.
+#:
+#: codex measures a different SET of processes (declared on ``SpawnPlan``),
+#: which makes its ceiling a different unit from the incoming one, so it states its
+#: own rather than narrowing what it was handed. See ``acp/harness/codex.py``.
+DECLARED_RECLAIM_OVERRIDES = {
+    ACP_BACKEND_CODEX: ReclaimPolicy(max_age_secs=123.0, max_rss_mb=1024.0),
+}
+
+
 @pytest.mark.parametrize("backend", ALL_BACKENDS)
 def test_reclaim_thresholds_pass_the_operator_configuration_through(backend):
-    """A harness narrows these for a leaky host; nothing in the kiro family does."""
+    """Pass-through is the contract; an override is declared and pinned.
+
+    A harness narrows these for a host known to leak faster, and one that measures a
+    different set of processes states its own ceiling instead -- so the assertion
+    splits on the declaration rather than on the harness's identity. An override that
+    appears without a row here fails on the pass-through arm, which is the point:
+    quietly reinterpreting an operator's configured ceiling for one host is the
+    failure this ratchet catches.
+    """
     policy = harness_for(backend).reclaim_policy(max_age_secs=123.0, max_rss_mb=45.0)
-    assert policy == ReclaimPolicy(max_age_secs=123.0, max_rss_mb=45.0)
+    expected = DECLARED_RECLAIM_OVERRIDES.get(
+        backend, ReclaimPolicy(max_age_secs=123.0, max_rss_mb=45.0)
+    )
+    assert policy == expected
+
+
+def test_every_declared_reclaim_override_is_still_an_override():
+    """The declaration list is pruned by its own test, so it cannot rot.
+
+    A row left behind after a harness returns to pass-through is a standing
+    pre-approval for a change nobody is making, and the test above would then pass
+    for a harness that overrides nothing.
+    """
+    for backend, declared in DECLARED_RECLAIM_OVERRIDES.items():
+        assert backend in ALL_BACKENDS, backend
+        assert declared != ReclaimPolicy(max_age_secs=123.0, max_rss_mb=45.0), (
+            f"{backend!r} is declared as overriding Seam 9 but its declared policy is "
+            "the pass-through answer; remove the row"
+        )
+
+
+def test_age_is_never_reinterpreted_by_an_override():
+    """Nothing about age changes with a measurement scope, so no host may move it.
+
+    An override exists to state a ceiling in its own unit. Age has one unit for every
+    host, so a harness moving it is narrowing the operator's configuration under
+    cover of a scope change.
+    """
+    for backend in ALL_BACKENDS:
+        policy = harness_for(backend).reclaim_policy(max_age_secs=987.0, max_rss_mb=45.0)
+        assert policy.max_age_secs == 987.0, backend
 
 
 # ── The Kiro path gains no failure mode (harness-parity H13) ──
@@ -853,9 +903,12 @@ def test_the_kiro_family_ignores_the_advertised_capabilities(backend):
 def test_codex_narrows_the_array_against_what_the_handshake_advertised():
     """The counterexample the two family assertions above must not swallow.
 
-    codex reads no agent spec, so this array IS the session's tool surface, and one
-    element whose transport the adapter never advertised fails the WHOLE
-    ``session/new`` with ``-32600``.
+    codex reads no agent spec, so this array IS the session's tool surface -- and an
+    element whose transport the adapter never advertised is ACCEPTED rather than
+    refused: ``session/new`` answers with a ``sessionId`` and that server is never
+    wired. The narrowing here is the only guard that the array Crew sends is the
+    array the adapter honours, because a session carrying an unwired server reports
+    nothing.
     """
     harness = harness_for(ACP_BACKEND_CODEX)
     requested = [{"name": "keep", "url": "http://keep"}, {"name": "drop", "type": "sse"}]
@@ -917,9 +970,9 @@ def test_the_mcp_seam_is_a_transform_not_an_addition():
     """The seam takes the caller's list IN, which is what lets a host narrow it.
 
     A host with no agent spec has nothing but this array describing its tool
-    surface, and one element whose transport it never advertised can cost the
-    whole session rather than that one server. A field on SessionExtras could
-    only ADD, so such a host could not be served at all.
+    surface, and it may ACCEPT an element whose transport it never advertised and
+    then wire nothing for it, so only the client can keep the two in step. A field
+    on SessionExtras could only ADD, so such a host could not be served at all.
     """
     sig = inspect.signature(HarnessAdapter.session_mcp_servers)
     assert list(sig.parameters) == ["self", "requested", "agent_capabilities"]

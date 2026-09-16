@@ -10,12 +10,14 @@ then claude-agent-acp, then codex, which is in that state on a plain build today
 
 A mirror is the FIX for one backend. This is the DETECTOR, and it is worth being
 exact about its reach rather than claiming the tidier thing: the resolver is
-provider-neutral, but the runtime call site is ``AcpClient``'s ``session/new`` /
-``session/load`` composition, so it covers kiro-cli, claude and codex. **KAS runs
-on ``AcpRuntime``, which composes its array elsewhere and never reaches this
-detector** -- so a KAS session's refs are checked only by ``kirocrew doctor``, and
-wiring that second transport is a separate change. Saying "all of them" here would
-be the same kind of unexamined claim the mirrors folder exists to stop.
+provider-neutral, and it is evaluated at BOTH session-establishment transports --
+``AcpClient``'s ``session/new`` / ``session/load`` composition (one process per
+session: claude) and ``AcpRuntime``'s (the shared process: kiro-cli, KAS, codex).
+Each evaluates it against the array that actually went on the wire, after the
+harness's own narrowing, so a ref is never read as satisfied by a server the wire
+did not carry. Saying "all of them" is earned here by a test per transport that
+pins every roster hand-off to a guard call, not by assertion -- the unexamined
+claim about backend coverage is the defect the mirrors folder exists to stop.
 
 **It lives in the SDK rather than in the ACP layer because the question is not an
 ACP question.** Given a spec, the server array a session is about to receive and
