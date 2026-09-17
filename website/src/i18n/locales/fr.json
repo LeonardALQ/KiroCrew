@@ -10986,6 +10986,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "Backend de l’agent",
+        "approval_agent_spec": "Demande avant chaque outil, parce que {{productName}} le lui impose.",
+        "approval_seeded_settings": "Demande avant chaque outil seulement si ses propres réglages le disent. {{productName}} écrit ce réglage et ne peut pas confirmer qu'il a pris effet.",
+        "approval_session_config": "Demande avant chaque outil. {{productName}} l'active et le vérifie.",
+        "approval_unverified": "Rien ne prouve que cet agent demande avant d'utiliser un outil.",
+        "approval_verified_gate_extension": "Demande avant chaque outil via une extension que {{productName}} charge et vérifie.",
+        "approval_verified_seeded_settings": "Demande avant chaque outil. {{productName}} l'active puis le relit.",
+        "card_available": "Disponible.",
+        "card_crew_tools": "Les outils de {{productName}} fonctionnent dans le chat",
+        "card_manual_compact": "La commande /compact fonctionne",
+        "card_markdown_agents": "Les agents écrits dans un seul fichier markdown fonctionnent",
+        "card_member_saved_agent": "Les membres chargent tout leur agent enregistré",
+        "card_member_thread_tools": "Les chats de membres reçoivent les outils de session",
+        "card_mid_turn_steer": "Tu peux envoyer un message pendant qu'il travaille",
+        "card_model_switch": "Le modèle peut être changé dans le chat",
+        "card_not_available": "Non disponible.",
+        "card_operator_notes": "Bon à savoir",
+        "card_private_member_sessions": "Les chats privés de membres peuvent démarrer",
+        "card_reasoning_effort": "L'effort de raisonnement peut être modifié",
+        "card_side_chat_tools": "Side Chat peut utiliser des outils en lecture seule",
+        "card_subagent_continuation": "Un chat de sous-agent peut être repris plus tard",
+        "card_supports_n_of_m": "{{name}} prend en charge {{available}} sur {{total}}",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code demande normalement une autorisation avant d'agir, et {{productName}} filtre cette demande. Mais un outil pré-approuvé dans les réglages propres à Claude — y compris via un .claude/settings.json dans le projet — ne demande rien, si bien que les règles de refus et le journal d'audit ne voient pas cet appel.",
         "could_not_load_the_agent_backend": "Impossible de charger le backend de l’agent.",
@@ -11000,6 +11021,15 @@
         "missing_components": "Manquant sur cette machine : {{components}}",
         "missing_components_with_command": "Manquant sur cette machine : {{components}}. Installez-le avec : {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "Les nouvelles sessions utilisent cet agent. Une session déjà ouverte conserve celui avec lequel elle a démarré : changer ici ne la modifie pas en cours de session.",
+        "not_offered_by_this_build": "Cette version ne propose pas cet agent.",
+        "note_crew_command_channel": "Les commandes slash passent par le canal de commandes de {{productName}}.",
+        "note_crew_sandbox_stands_down": "S'exécute dans son propre bac à sable, donc celui de {{productName}} se retire pour lui.",
+        "note_harness_model_list": "La liste des modèles vient de l'agent, pas de {{productName}}.",
+        "note_host_credential_to_child": "{{productName}} confie à cet agent sa propre connexion.",
+        "note_keeps_own_chat_record": "Cet agent conserve sa propre copie de la conversation.",
+        "note_own_credential_store": "Se connecte avec son propre fichier, pas avec la connexion de {{productName}}.",
+        "note_pod_home_relocated": "Dans un pod, son dossier personnel est déplacé dans le pod, et sa connexion enregistrée suit.",
+        "note_refuses_unclassified_tools": "Un appel d'outil qu'il ne peut pas nommer est refusé, pas approuvé.",
         "retry": "Réessayer",
         "set_is_fixed_at_gateway_start": "Les agents affichés ici sont déterminés au démarrage du gateway. Un déploiement géré peut restreindre l'ensemble par politique ; modifier cette politique prend effet au prochain démarrage."
       },
@@ -11051,7 +11081,7 @@
       "feature_previews_moved": "Les aperçus de fonctionnalités sont passés dans Paramètres > Développeur",
       "tabs": {
         "agentBackend": {
-          "description": "Quel agent les nouvelles sessions démarrent : Kiro CLI, Claude Code ou KAS",
+          "description": "Quel agent démarrent les nouvelles sessions",
           "label": "Backend de l’agent"
         },
         "archive": {

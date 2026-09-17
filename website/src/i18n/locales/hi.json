@@ -10829,6 +10829,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "एजेंट बैकएंड",
+        "approval_agent_spec": "हर टूल से पहले पूछता है, क्योंकि {{productName}} ऐसा तय करता है।",
+        "approval_seeded_settings": "हर टूल से पहले तभी पूछता है जब उसकी अपनी सेटिंग यही कहे। {{productName}} वह सेटिंग लिखता है पर उसका असर हुआ या नहीं, यह पक्का नहीं कर सकता।",
+        "approval_session_config": "हर टूल से पहले पूछता है। {{productName}} इसे चालू करता और जाँचता है।",
+        "approval_unverified": "इसका कोई सबूत नहीं है कि यह एजेंट टूल चलाने से पहले पूछता है।",
+        "approval_verified_gate_extension": "{{productName}} जो एक्सटेंशन लोड कर जाँचता है, उसके ज़रिये हर टूल से पहले पूछता है।",
+        "approval_verified_seeded_settings": "हर टूल से पहले पूछता है। {{productName}} इसे सेट करता और पढ़कर पक्का करता है।",
+        "card_available": "उपलब्ध है।",
+        "card_crew_tools": "{{productName}} के अपने टूल चैट में काम करते हैं",
+        "card_manual_compact": "/compact कमांड काम करता है",
+        "card_markdown_agents": "एक markdown फ़ाइल में लिखे एजेंट काम करते हैं",
+        "card_member_saved_agent": "सदस्य अपना पूरा सहेजा हुआ एजेंट लोड करते हैं",
+        "card_member_thread_tools": "सदस्य चैट को सेशन टूल मिलते हैं",
+        "card_mid_turn_steer": "काम चलते रहने पर भी संदेश भेजा जा सकता है",
+        "card_model_switch": "चैट के भीतर मॉडल बदला जा सकता है",
+        "card_not_available": "उपलब्ध नहीं है।",
+        "card_operator_notes": "जानना अच्छा है",
+        "card_private_member_sessions": "सदस्यों की निजी चैट शुरू हो सकती है",
+        "card_reasoning_effort": "सोचने की गहराई बदली जा सकती है",
+        "card_side_chat_tools": "Side Chat केवल पढ़ने वाले टूल चला सकता है",
+        "card_subagent_continuation": "सब-एजेंट चैट को बाद में आगे बढ़ाया जा सकता है",
+        "card_supports_n_of_m": "{{name}} {{total}} में से {{available}} का समर्थन करता है",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code आमतौर पर कार्य करने से पहले अनुमति मांगता है, और {{productName}} उस अनुरोध की जांच करता है। लेकिन Claude की अपनी सेटिंग्स में पहले से स्वीकृत टूल — जिसमें प्रोजेक्ट के अंदर की .claude/settings.json भी शामिल है — कुछ नहीं पूछता, इसलिए अस्वीकृति नियम और ऑडिट लॉग उस कॉल को नहीं देखते।",
         "could_not_load_the_agent_backend": "एजेंट बैकएंड लोड नहीं किया जा सका।",
@@ -10843,6 +10864,15 @@
         "missing_components": "इस मशीन पर अनुपस्थित: {{components}}",
         "missing_components_with_command": "इस मशीन पर अनुपस्थित: {{components}}। इससे इंस्टॉल करें: {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "नए सत्र इस एजेंट का उपयोग करते हैं। पहले से खुला सत्र उसी एजेंट पर बना रहता है जिससे वह शुरू हुआ था — यहाँ बदलने से चालू सत्र नहीं बदलता।",
+        "not_offered_by_this_build": "यह बिल्ड यह एजेंट नहीं देता।",
+        "note_crew_command_channel": "स्लैश कमांड {{productName}} के कमांड चैनल से जाते हैं।",
+        "note_crew_sandbox_stands_down": "यह अपने ही अलग घेरे में चलता है, इसलिए {{productName}} का घेरा इसके लिए पीछे हट जाता है।",
+        "note_harness_model_list": "मॉडल सूची एजेंट से आती है, {{productName}} से नहीं।",
+        "note_host_credential_to_child": "{{productName}} अपना साइन-इन इस एजेंट को सौंप देता है।",
+        "note_keeps_own_chat_record": "यह एजेंट बातचीत की अपनी प्रति भी रखता है।",
+        "note_own_credential_store": "यह {{productName}} के साइन-इन से नहीं, अपनी फ़ाइल से साइन इन करता है।",
+        "note_pod_home_relocated": "पॉड के भीतर इसका होम फ़ोल्डर पॉड पर चला जाता है, और सहेजा हुआ साइन-इन भी साथ चला जाता है।",
+        "note_refuses_unclassified_tools": "जिस टूल कॉल की पहचान न हो, उसे मंज़ूरी नहीं, मना किया जाता है।",
         "retry": "पुनः प्रयास करें",
         "set_is_fixed_at_gateway_start": "यहाँ कौन-से एजेंट दिखते हैं यह gateway शुरू होने पर तय होता है। प्रबंधित परिनियोजन नीति द्वारा इस समूह को सीमित कर सकता है; उस नीति में बदलाव अगली शुरुआत पर लागू होता है।"
       },
@@ -10894,7 +10924,7 @@
       "feature_previews_moved": "फ़ीचर प्रीव्यू अब सेटिंग्स > डेवलपर में हैं",
       "tabs": {
         "agentBackend": {
-          "description": "नए सत्र कौन-सा एजेंट शुरू करते हैं — Kiro CLI, Claude Code या KAS",
+          "description": "नए सेशन कौन-सा एजेंट शुरू करते हैं",
           "label": "एजेंट बैकएंड"
         },
         "archive": {

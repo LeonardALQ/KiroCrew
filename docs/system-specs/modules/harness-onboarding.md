@@ -103,6 +103,50 @@ The tuning channels are one set each rather than one "tuning" set, because a
 harness can implement one and not another. If your harness needs a tuning
 channel none of them describes, add a set — do not widen an existing one.
 
+### And this appears on the card
+
+Every decision in this stage is READ BACK to the operator. Developer > Agent
+Backend renders one capability card per harness, and each line of it is projected
+from these memberships by `agent_sdk/backend_cards.py` — so a membership is not
+only what the code branches on, it is what an operator comparing two harnesses is
+shown before they pick one.
+
+That projection is why this stage costs a new harness nothing beyond the decisions
+it already owes. A harness that joins `ACP_BACKENDS_KNOWN` and decides every set
+renders a complete card with no edit to any card file, no frontend edit and no
+locale edit: labels are written once per CAPABILITY and reused by every harness.
+`test_backend_cards.py` holds that as a test rather than as a promise.
+
+Each set reaches one of four buckets, and a new set must be put in one of them or
+`test_backend_cards` fails — the same forcing function the disposition table applies
+to a set's consumers:
+
+| Bucket | What it means | Where |
+|---|---|---|
+| user-facing | Switching harness changes what the user can DO, and the absence is a LOSS: a control disappears, a command is refused, tools are missing from a session. | `USER_FACING_LINES`, rendered available / not available |
+| security | It moves a confinement or credential boundary: which layer confines the agent, whether Crew hands its own credential to the child, how an unclassifiable approval is answered. | `SECURITY_LINES`, stated only when it HOLDS, rendered OUTSIDE every disclosure |
+| operator | It says where something LIVES: whose disk holds the transcript, which side supplies the model list, which channel carries a command. | `OPERATOR_LINES`, stated only when it HOLDS |
+| off-card | The only difference is which code path runs, OR the card cannot honestly project the membership. Two tests: if the membership were wrong, would the user see a missing feature or a BUG? A defect is not a capability. And can this card establish the fact at all? A version-gated membership cannot be marked available by a projection that holds no version. | `OFF_CARD_SETS`, with the reason per set |
+
+Two rules decide the bucket, and both are about what a mark on a card MEANS.
+
+**A membership whose two states are both correct behaviour is a note, never a
+line.** Three sets are that kind today. Crew holds the kiro family's transcript and
+serves its model ids from its own registry, so a not-available mark on either would
+report the default harness as missing something it never needed. And
+`ACP_BACKENDS_KIRO_SLASH_COMMANDS` names an RPC rather than the feature: a
+non-member is not command-less — opencode and pi both publish their own built-ins as
+an `available_commands_update` — so the card states which CHANNEL carries a command
+and claims nothing about a harness that carries its own. If your harness has an
+equivalent mechanism under another name, say so in the set's comment: that is what
+decides whether its line is a loss or a note.
+
+**The card is two-level on purpose.** A `frozenset` carries one bit, so "does it
+differently" and "nobody measured it" cannot be told apart from "cannot", and a
+graded level would have to be authored per harness per capability. The one
+genuinely graded fact is Stage 4's routing, rendered from `Routing`'s own five
+mechanisms — and it, like the security notes, is never hidden behind a disclosure.
+
 ## Stage 3 — the spawn path
 
 This is the irreducible new code, and on the harnesses measured so far it is the

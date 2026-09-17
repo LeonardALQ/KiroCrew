@@ -10672,6 +10672,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "代理后端",
+        "approval_agent_spec": "每次用工具前都会先问，因为 {{productName}} 就是这么定的。",
+        "approval_seeded_settings": "只有它自己的设置这么写时，才会每次用工具前先问。{{productName}} 会写入这项设置，但无法确认是否真的生效。",
+        "approval_session_config": "每次用工具前都会先问。{{productName}} 打开这个开关并做检查。",
+        "approval_unverified": "没有证据表明这个代理用工具前会先问。",
+        "approval_verified_gate_extension": "通过 {{productName}} 装入并检查过的扩展，每次用工具前都会先问。",
+        "approval_verified_seeded_settings": "每次用工具前都会先问。{{productName}} 写入这项设置，并读回来确认。",
+        "card_available": "可用。",
+        "card_crew_tools": "{{productName}} 自带的工具能在聊天里使用",
+        "card_manual_compact": "/compact 命令可用",
+        "card_markdown_agents": "用单个 markdown 文件写的代理可用",
+        "card_member_saved_agent": "成员会完整加载自己保存的代理",
+        "card_member_thread_tools": "成员聊天会挂上会话工具",
+        "card_mid_turn_steer": "它正在干活时也能再发一条消息",
+        "card_model_switch": "可以在聊天里换模型",
+        "card_not_available": "不可用。",
+        "card_operator_notes": "值得知道",
+        "card_private_member_sessions": "成员的私有聊天可以启动",
+        "card_reasoning_effort": "可以调整思考力度",
+        "card_side_chat_tools": "Side Chat 可以运行只读工具",
+        "card_subagent_continuation": "子代理的聊天以后还能接着聊",
+        "card_supports_n_of_m": "{{name}} 支持 {{total}} 项中的 {{available}} 项",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code 通常会先请求批准，{{productName}} 会对该请求做把关。但如果某个工具已在 Claude 自身设置里预先批准（包括项目内那份 .claude/settings.json），它就不会再请求，因此拒绝规则和审计日志看不到这次调用。",
         "could_not_load_the_agent_backend": "无法加载代理后端。",
@@ -10686,6 +10707,15 @@
         "missing_components": "本机缺少：{{components}}",
         "missing_components_with_command": "本机缺少：{{components}}。安装命令：{{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "新会话使用此代理。已打开的会话保持启动时所用的代理；在此切换不影响正在进行的会话。",
+        "not_offered_by_this_build": "这个构建不提供这个代理。",
+        "note_crew_command_channel": "斜杠命令走 {{productName}} 自己的命令通道。",
+        "note_crew_sandbox_stands_down": "它在自己的隔离环境里运行，所以 {{productName}} 的隔离就不再介入。",
+        "note_harness_model_list": "模型列表来自代理，不是来自 {{productName}}。",
+        "note_host_credential_to_child": "{{productName}} 会把自己的登录交给这个代理。",
+        "note_keeps_own_chat_record": "这个代理会自己留一份聊天记录。",
+        "note_own_credential_store": "它用自己的文件登录，不用 {{productName}} 的登录。",
+        "note_pod_home_relocated": "在 pod 里，它的主目录会挪到 pod 上，保存的登录也一起挪过去。",
+        "note_refuses_unclassified_tools": "认不出种类的工具调用会被拒绝，而不是放过。",
         "retry": "重试",
         "set_is_fixed_at_gateway_start": "此处显示哪些 agent 在 gateway 启动时确定。受管部署可通过策略限制该集合；修改策略需下次启动才生效。"
       },
@@ -10737,7 +10767,7 @@
       "feature_previews_moved": "功能预览已移至“设置 > 开发者”",
       "tabs": {
         "agentBackend": {
-          "description": "新会话启动哪个代理 — Kiro CLI、Claude Code 或 KAS",
+          "description": "新会话启动哪个代理",
           "label": "代理后端"
         },
         "archive": {

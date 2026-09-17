@@ -11143,6 +11143,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "Бэкенд агента",
+        "approval_agent_spec": "Спрашивает перед каждым инструментом, потому что так задаёт {{productName}}.",
+        "approval_seeded_settings": "Спрашивает перед каждым инструментом только если так говорят его собственные настройки. {{productName}} записывает эту настройку и не может подтвердить, что она подействовала.",
+        "approval_session_config": "Спрашивает перед каждым инструментом. {{productName}} включает это и проверяет.",
+        "approval_unverified": "Ничто не подтверждает, что этот агент спрашивает перед вызовом инструмента.",
+        "approval_verified_gate_extension": "Спрашивает перед каждым инструментом через расширение, которое {{productName}} загружает и проверяет.",
+        "approval_verified_seeded_settings": "Спрашивает перед каждым инструментом. {{productName}} задаёт это и читает обратно.",
+        "card_available": "Доступно.",
+        "card_crew_tools": "Инструменты {{productName}} работают в чате",
+        "card_manual_compact": "Команда /compact работает",
+        "card_markdown_agents": "Агенты из одного файла markdown работают",
+        "card_member_saved_agent": "Участники загружают весь сохранённый агент",
+        "card_member_thread_tools": "Чаты участников получают инструменты сессии",
+        "card_mid_turn_steer": "Можно отправить сообщение, пока идёт работа",
+        "card_model_switch": "Модель можно сменить внутри чата",
+        "card_not_available": "Недоступно.",
+        "card_operator_notes": "Полезно знать",
+        "card_private_member_sessions": "Приватные чаты участников могут запускаться",
+        "card_reasoning_effort": "Глубину размышления можно изменить",
+        "card_side_chat_tools": "Side Chat может запускать инструменты только для чтения",
+        "card_subagent_continuation": "Чат субагента можно продолжить позже",
+        "card_supports_n_of_m": "{{name}} поддерживает {{available}} из {{total}}",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code обычно запрашивает разрешение перед действием, и {{productName}} проверяет этот запрос. Но инструмент, заранее одобренный в собственных настройках Claude — включая .claude/settings.json внутри проекта — не запрашивает ничего, поэтому правила запрета и журнал аудита не видят такой вызов.",
         "could_not_load_the_agent_backend": "Не удалось загрузить бэкенд агента.",
@@ -11157,6 +11178,15 @@
         "missing_components": "Отсутствует на этой машине: {{components}}",
         "missing_components_with_command": "Отсутствует на этой машине: {{components}}. Установите: {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "Новые сессии используют этого агента. Уже открытая сессия сохраняет того, с которым была начата, — переключение здесь не меняет её посреди сессии.",
+        "not_offered_by_this_build": "Эта сборка не предлагает такого агента.",
+        "note_crew_command_channel": "Слэш-команды идут по командному каналу {{productName}}.",
+        "note_crew_sandbox_stands_down": "Работает в своей песочнице, поэтому песочница {{productName}} для него отключается.",
+        "note_harness_model_list": "Список моделей приходит от агента, а не от {{productName}}.",
+        "note_host_credential_to_child": "{{productName}} передаёт этому агенту свой вход в систему.",
+        "note_keeps_own_chat_record": "Этот агент хранит свою копию переписки.",
+        "note_own_credential_store": "Входит по своему файлу, а не через вход {{productName}}.",
+        "note_pod_home_relocated": "Внутри пода его домашняя папка переносится в под, и сохранённый вход переезжает вместе с ней.",
+        "note_refuses_unclassified_tools": "Вызов инструмента, который он не может опознать, отклоняется, а не одобряется.",
         "retry": "Повторить",
         "set_is_fixed_at_gateway_start": "Какие агенты здесь появляются, определяется при запуске gateway. Управляемое развёртывание может ограничить набор политикой; изменения политики вступают в силу при следующем запуске."
       },
@@ -11208,7 +11238,7 @@
       "feature_previews_moved": "Предпросмотр функций переехал в Настройки > Разработчик",
       "tabs": {
         "agentBackend": {
-          "description": "Какого агента запускают новые сессии — Kiro CLI, Claude Code или KAS",
+          "description": "Какой агент запускают новые сессии",
           "label": "Бэкенд агента"
         },
         "archive": {

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, Boxes, Sparkles, Terminal } from 'lucide-react'
+import { Bot, Boxes, Check, Sparkles, Terminal, X } from 'lucide-react'
 
 import { api } from '../../api/client'
 import type { AcpBackendProbe } from '../../api/client'
@@ -35,6 +35,15 @@ const KAS = 'kas'
  * names it, labelled with its `policy_id`.
  */
 const NAMED = [KIRO, CLAUDE, KAS]
+
+/**
+ * The tool-approval mechanism that means nothing establishes how a harness asks.
+ *
+ * The core's own `Routing.UNVERIFIED` value. A harness carrying it can never be
+ * selectable — `register_selectable_backend` refuses it — so it is also the
+ * reason a known agent is not on offer.
+ */
+const APPROVAL_UNVERIFIED = 'unverified'
 
 /**
  * DOM id of the row that states a backend's status.
@@ -107,27 +116,45 @@ const PROBE_REFRESH_MS = 30_000
  * DISABLE costs a user a control they were entitled to and an install they did not
  * need.
  *
- * ## Why each row says so little
+ * ## What each row says about the harness, and where those words come from
  *
- * An earlier revision wrote a prose sentence per agent claiming what each one
- * supports — sandboxing, shared processes, mid-turn steer, subagent progress.
+ * A reader choosing between agents is choosing between capability sets, so each
+ * row carries a CARD: one line per capability, marked available or not, plus the
+ * notes that hold and the one line about tool approval.
+ *
+ * Two things on it are never behind the disclosure: how the agent is made to ask
+ * before it runs a tool, and the SECURITY notes, which say which layer confines
+ * it and whether Crew hands it Crew's own credential. Those are the facts an
+ * operator is choosing between, and a fact behind a closed disclosure is a fact
+ * they do not see. Which notes are security notes is the SERVER's
+ * classification, sent as its own list, so this file cannot promote or bury one.
+ *
+ * Not one word of it is authored per agent. The server projects every line from
+ * the capability memberships the core already declares
+ * (`agent_sdk/backend_cards.py`) and sends them as ids; this file holds a LABEL
+ * per id. That is the whole reason the card can be translated at all: a label
+ * belongs to a CAPABILITY, so it is written once and every agent reuses it, and a
+ * new agent renders a complete card with no edit here and no locale edit either.
+ * A new LINE is what costs thirteen locale files.
+ *
+ * An earlier revision instead wrote a prose sentence per agent claiming what each
+ * one supports — sandboxing, shared processes, mid-turn steer, subagent progress.
  * Those claims were not measured anywhere; they were asserted here, in the view
- * layer, where nothing can contradict them. They were wrong in the ways
- * unmeasured claims usually are.
+ * layer, where nothing can contradict them. They were wrong in the ways unmeasured
+ * claims usually are. The card is the opposite arrangement: every mark on it is a
+ * membership some other file had to justify with evidence, and this file cannot
+ * state anything the core does not already claim.
  *
- * The status line per row is therefore limited to what this build can actually
- * establish, and the vocabulary is taken from the ACP-adapter card rather than
- * invented again: `Default. All features supported.` for the backend whose
- * descriptor is all-supported, `Experimental` for one that is not, and a
- * not-enabled line for one this build cannot run. Per-capability detail
- * (which feature is supported, degraded, or unverified per backend) needs the
- * descriptor table that owns those facts and is deliberately NOT restated here.
+ * The card is two-level, available or not, and that ceiling is the source data's
+ * rather than a simplification: a membership set carries one bit, so "does it
+ * differently" and "nobody measured it" are indistinguishable from "cannot". The
+ * one genuinely graded fact — how the harness is made to ask before running a tool
+ * — arrives as the core's own five-mechanism enum and is rendered from it.
  *
- * The two probe lines (missing components, and check-failed) are the exception
- * that proves the rule rather than a relaxation of it: they are not claims about
- * what a backend supports, they are a measurement the server took on this machine
- * and named. They say only what was measured — which components are absent, and
- * the command that installs them when there is one to give.
+ * The status line, the two probe lines and the standing caveats keep their own
+ * jobs: the status line says whether the option is live on this machine, and the
+ * probe lines name what is absent and the command that installs it. They are
+ * measurements this gateway took, not claims about capability.
  *
  * Deliberately NOT under `pages/settings/`: `gen-settings-registry.mjs` scans that
  * directory, and indexing an agent switch into Settings search would advertise it
@@ -260,6 +287,20 @@ export function AgentBackendTab() {
     (selectable ? !selectable.includes(value) : false) || probe(value)?.selectable === false
 
   /**
+   * Known to the core, and never on offer from this BUILD — as opposed to denied by
+   * this deployment's policy.
+   *
+   * The two look identical through `selectable` alone, and they are not the same
+   * thing to a reader: a policy denial is not theirs to fix and is hidden, while a
+   * build exclusion is a standing fact about the agent that its own tool-approval
+   * line explains. `offered_by_build` is what tells them apart, and it is read
+   * together with `unavailable` so a payload that somehow said both would defer to
+   * selectability rather than hiding a live option.
+   */
+  const buildExcluded = (value: string) =>
+    probe(value)?.offered_by_build === false && unavailable(value)
+
+  /**
    * Every agent id this panel could render, from the SERVER rather than a literal.
    *
    * This used to be `[KIRO, CLAUDE, KAS]`, which quietly made the panel the last
@@ -321,7 +362,7 @@ export function AgentBackendTab() {
   })
 
   /**
-   * The agents this panel renders at all.
+   * The agents this panel offers as CHOICES.
    *
    * An agent the deployment may not select is HIDDEN, not shown disabled. A greyed
    * chip invites the reader to find out how to enable it, and under a managed policy
@@ -333,6 +374,19 @@ export function AgentBackendTab() {
    * a control rendering no selected chip is a worse failure than one extra row.
    */
   const visible = candidates.filter(value => value === current || !unavailable(value))
+
+  /**
+   * The agents this panel DESCRIBES, which is a wider set than it offers.
+   *
+   * Every offered agent, plus the ones this build never offers at all. Those get a
+   * card and no chip: the core knows them well enough for a governance rule to name
+   * one, and an operator asking "why can I not pick that?" is asking about a fact
+   * the card already carries. Hiding them answers the question with silence, and
+   * offering them would be a chip whose PATCH is refused.
+   *
+   * Deployment-denied agents stay out — that is `visible`'s rule and it is unchanged.
+   */
+  const described = candidates.filter(value => visible.includes(value) || buildExcluded(value))
 
   /**
    * Installed === 'missing' is the only verdict that disables. `'unknown'` and an
@@ -372,6 +426,12 @@ export function AgentBackendTab() {
    * choosing between governance models, so the panel names the difference instead of
    * letting them find it in a shell command that never asked. It is a TOOL-GATING
    * disclosure and not an auth one, so nothing below replaces it.
+   *
+   * The card's tool-approval line comes CLOSE to stating this from data — Claude's
+   * routing is the declared-but-unenforced mechanism, and the label says the setting
+   * cannot be read back — and it does not carry the part that matters most here,
+   * which is WHERE the pre-approval an operator did not write can come from. Until
+   * that is expressed as data, this sentence stays.
    *
    * Which is why this returns a LIST rather than one string. Claude is the harness
    * that carries both -- its tool gating has the caveat above AND it signs in through
@@ -435,6 +495,69 @@ export function AgentBackendTab() {
   }
 
   /**
+   * One label per CAPABILITY, keyed by the id the server sends.
+   *
+   * Per capability and never per agent: that is what makes a new agent cost no
+   * locale edit, and it is the difference from `auth.sign_in_remedy`, which is
+   * per-agent prose and therefore stays untranslated. An id absent here is SKIPPED
+   * — a raw `private_memory_mcp` in front of a reader is worse than one line fewer
+   * — which is the opposite of `nameOf`'s fallback, because a chip with no text at
+   * all is worse than a policy id.
+   */
+  const CAPABILITY_LABEL: Record<string, string> = {
+    crew_tools: i18nT('pages.developer.agentBackendTab.card_crew_tools'),
+    member_thread_tools: i18nT('pages.developer.agentBackendTab.card_member_thread_tools'),
+    member_saved_agent: i18nT('pages.developer.agentBackendTab.card_member_saved_agent'),
+    private_member_sessions: i18nT('pages.developer.agentBackendTab.card_private_member_sessions'),
+    side_chat_tools: i18nT('pages.developer.agentBackendTab.card_side_chat_tools'),
+    subagent_continuation: i18nT('pages.developer.agentBackendTab.card_subagent_continuation'),
+    mid_turn_steer: i18nT('pages.developer.agentBackendTab.card_mid_turn_steer'),
+    manual_compact: i18nT('pages.developer.agentBackendTab.card_manual_compact'),
+    reasoning_effort: i18nT('pages.developer.agentBackendTab.card_reasoning_effort'),
+    model_switch: i18nT('pages.developer.agentBackendTab.card_model_switch'),
+    markdown_agents: i18nT('pages.developer.agentBackendTab.card_markdown_agents'),
+  }
+
+  /**
+   * One label per note, for BOTH note lists. The server keeps them in two lists
+   * because they render in two places, and the ids are disjoint, so one map
+   * cannot confuse them. Same rule as the capability labels above: keyed by
+   * capability, skipped when this frontend has no label for the id.
+   *
+   * These are stated only when they HOLD, so each reads as a fact rather than as a
+   * mark on a scale — the server sends the ids that apply and nothing else.
+   */
+  const NOTE_LABEL: Record<string, string> = {
+    crew_sandbox_stands_down: i18nT('pages.developer.agentBackendTab.note_crew_sandbox_stands_down'),
+    refuses_unclassified_tools: i18nT('pages.developer.agentBackendTab.note_refuses_unclassified_tools'),
+    host_credential_to_child: i18nT('pages.developer.agentBackendTab.note_host_credential_to_child'),
+    pod_home_relocated: i18nT('pages.developer.agentBackendTab.note_pod_home_relocated'),
+    own_credential_store: i18nT('pages.developer.agentBackendTab.note_own_credential_store'),
+    keeps_own_chat_record: i18nT('pages.developer.agentBackendTab.note_keeps_own_chat_record'),
+    harness_model_list: i18nT('pages.developer.agentBackendTab.note_harness_model_list'),
+    crew_command_channel: i18nT('pages.developer.agentBackendTab.note_crew_command_channel'),
+  }
+
+  /**
+   * One label per tool-approval MECHANISM — the core's own `Routing` values.
+   *
+   * The single graded line on the card, and the only one that is not a boolean,
+   * because the source data is not one either: `Routing` already distinguishes a
+   * guarantee that holds by construction, one applied and read back, one written
+   * and unconfirmable, and one that is not established at all. Keyed by mechanism
+   * rather than by agent, so a harness declaring an existing mechanism needs no
+   * label of its own.
+   */
+  const APPROVAL_LABEL: Record<string, string> = {
+    agent_spec: i18nT('pages.developer.agentBackendTab.approval_agent_spec'),
+    session_config: i18nT('pages.developer.agentBackendTab.approval_session_config'),
+    seeded_settings: i18nT('pages.developer.agentBackendTab.approval_seeded_settings'),
+    verified_seeded_settings: i18nT('pages.developer.agentBackendTab.approval_verified_seeded_settings'),
+    verified_gate_extension: i18nT('pages.developer.agentBackendTab.approval_verified_gate_extension'),
+    [APPROVAL_UNVERIFIED]: i18nT('pages.developer.agentBackendTab.approval_unverified'),
+  }
+
+  /**
    * A label for any selectable id, known to this frontend or not.
    *
    * The fallback is the server's `policy_id`, which exists precisely to be a
@@ -454,21 +577,52 @@ export function AgentBackendTab() {
   /** Generic mark for an agent this frontend has no icon for. */
   const iconOf = (value: string): React.ReactNode => ICON[value] ?? <Boxes size={14} />
 
+  /**
+   * The card's capability lines for one agent, dropping ids with no label here.
+   *
+   * Empty when the payload carried none — an older gateway, a 403, a query in
+   * flight — and the card then renders nothing at all, like every other absent
+   * probe field.
+   */
+  const capabilityLines = (value: string) =>
+    (probe(value)?.capabilities ?? []).filter(line => CAPABILITY_LABEL[line.id])
+
+  /**
+   * The SECURITY notes that hold for one agent: which layer confines it, whether
+   * Crew hands over its own credential, how an unclassifiable approval is
+   * answered. Rendered outside the disclosure, so a confinement boundary is
+   * never one click away from a reader comparing agents.
+   */
+  const securityNotes = (value: string) =>
+    (probe(value)?.security_notes ?? []).filter(id => NOTE_LABEL[id])
+
+  /** The where-it-lives notes that hold, dropping ids with no label here. */
+  const noteLines = (value: string) =>
+    (probe(value)?.operator_notes ?? []).filter(id => NOTE_LABEL[id])
+
+  /** The tool-approval sentence, or `''` when the payload named no mechanism. */
+  const approvalLine = (value: string): string => {
+    const mechanism = probe(value)?.tool_approval
+    return (mechanism && APPROVAL_LABEL[mechanism]) || ''
+  }
 
   /**
    * The one status line a row carries, derived rather than authored per agent.
    *
-   * The order is strict, because the reasons are not equally actionable. There is no
-   * not-selectable line: such an agent is not rendered at all, so every line here
-   * describes something the reader can act on. `missing` comes first because it is the
-   * one line that tells the user what to DO, and it names the command only when the
-   * server had one to give. `unknown` follows and must never read as missing; it
-   * reports a failed check, not an absent binary. Only then do the pre-existing
-   * default/experimental lines apply. KIRO is the all-supported descriptor, so it gets
-   * that sentence; anything else is not, so it gets `Experimental` rather than a claim.
+   * The order is strict, because the reasons are not equally actionable. A
+   * build-excluded agent comes first: nothing about installing or restarting is
+   * worth telling someone about an option this build will never offer, and the
+   * card's tool-approval line below already says why. `missing` comes next because
+   * it is the line that tells the user what to DO, and it names the command only
+   * when the server had one to give. `unknown` follows and must never read as
+   * missing; it reports a failed check, not an absent binary. Only then do the
+   * default/experimental lines apply. KIRO is the all-supported descriptor, so it
+   * gets that sentence; anything else is not, so it gets `Experimental` rather than
+   * a claim.
    */
   const status = (value: string): string => {
     const row = probe(value)
+    if (buildExcluded(value)) return i18nT('pages.developer.agentBackendTab.not_offered_by_this_build')
     if (row?.installed === 'missing') {
       const components = row.missing_components.join(', ')
       return row.install_command
@@ -512,26 +666,112 @@ export function AgentBackendTab() {
           // change. Only a real change is a save.
           onChange={v => { if (v !== current) patchMut.mutate(v) }}
         />
-        {/* One line per agent the panel offers — the reader is choosing BETWEEN them,
-            so showing only the selected one's status would hide the very comparison
-            the control is for. Agents this deployment may not select are absent from
-            `visible`, so they carry no line either. */}
+        {/* One block per agent the panel describes — the reader is choosing BETWEEN
+            them, so showing only the selected one's card would hide the very
+            comparison the control is for. Agents this deployment may not select are
+            absent from `described`, so they carry no block either. */}
         <dl className="mt-2 space-y-1.5">
-          {visible.map(value => (
+          {described.map(value => (
             <div key={value} className="flex gap-2 text-[11px] leading-relaxed">
               <dt className={`shrink-0 font-semibold ${value === current ? 'text-text-strong' : 'text-muted'}`}>
                 {nameOf(value)}
               </dt>
               <dd
                 id={statusId(value)}
+                // Warn is for the two states the reader can ACT on: install the
+                // binary, restart the gateway. A build-excluded row is neither --
+                // it is a permanent fact about the agent, and warn colouring it on
+                // every visit is alarm for something nobody can fix.
                 className={`m-0 ${disabledOption(value) ? 'text-warn' : 'text-muted'}`}
               >
                 {status(value)}
+                {/* Tool approval stays OUT of the disclosure below, and comes
+                    FIRST among the standing lines. It is the one
+                    security-relevant line on the card and the reason a
+                    build-excluded agent cannot be picked, so a reader must not
+                    have to open anything to reach it -- and on the one agent that
+                    also carries a gating caveat, "how it is made to ask" has to
+                    precede "and here is the hole in that", or the two read as
+                    two answers to one question. */}
+                {approvalLine(value) && (
+                  <div className="mt-0.5 text-muted">{approvalLine(value)}</div>
+                )}
                 {caveats(value).map(line => (
                   <div key={line} className="mt-0.5 text-muted">
                     {line}
                   </div>
                 ))}
+                {/* Security notes sit beside the approval line for the reason it
+                    is not in the disclosure either. Two of them describe a
+                    boundary MOVING -- Crew's own sandbox standing down for this
+                    child, and Crew handing over its own credential -- and the
+                    sandbox one fails open by design. An operator comparing agents
+                    must not have to open anything to find that. WHICH notes these
+                    are is the server's classification, sent as its own list. */}
+                {securityNotes(value).map(id => (
+                  // Emphasis as WEIGHT rather than as alarm, for the reason the
+                  // status line above is not warn either: these are permanent
+                  // properties of the agent, not problems awaiting a fix.
+                  <div key={id} className="mt-0.5 text-text-strong">
+                    {NOTE_LABEL[id]}
+                  </div>
+                ))}
+                {capabilityLines(value).length > 0 && (
+                  /* Collapsed by default, and native rather than a state hook: with
+                     up to fifteen lines per agent an open card on every row would
+                     bury the control the panel exists for, while a `<details>` keeps
+                     each agent's card one click away, searchable in the page, and
+                     open on print. The summary carries the count so the rows can be
+                     compared without opening any of them. */
+                  <details className={`mt-1 ${buildExcluded(value) ? 'opacity-60' : ''}`}>
+                    <summary className="cursor-pointer text-muted">
+                      {/* The agent's NAME rides in the summary, not just in the
+                          <dt> to the left: with two cards open at once the lists
+                          are far from their labels, and a count with no name is a
+                          number the reader has to trace back. */}
+                      {i18nT('pages.developer.agentBackendTab.card_supports_n_of_m', {
+                        name: nameOf(value),
+                        available: capabilityLines(value).filter(line => line.available).length,
+                        total: capabilityLines(value).length,
+                      })}
+                    </summary>
+                    <ul className="mt-1 mb-0 list-none pl-0 space-y-0.5">
+                      {capabilityLines(value).map(line => (
+                        <li key={line.id} className="flex items-start gap-1.5">
+                          {/* The icon is decorative and the STATE is text: a mark
+                              that only differs by shape and colour is unreadable
+                              to a screen reader and to anyone who cannot tell the
+                              two colours apart. */}
+                          {line.available ? (
+                            <Check size={12} aria-hidden className="mt-0.5 shrink-0 text-ok" />
+                          ) : (
+                            <X size={12} aria-hidden className="mt-0.5 shrink-0 text-muted" />
+                          )}
+                          <span className={line.available ? 'text-text-strong' : 'text-muted'}>
+                            <span className="sr-only">
+                              {line.available
+                                ? i18nT('pages.developer.agentBackendTab.card_available')
+                                : i18nT('pages.developer.agentBackendTab.card_not_available')}
+                            </span>
+                            {CAPABILITY_LABEL[line.id]}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {noteLines(value).length > 0 && (
+                      <>
+                        <div className="mt-1.5 font-semibold text-muted">
+                          {i18nT('pages.developer.agentBackendTab.card_operator_notes')}
+                        </div>
+                        <ul className="mt-0.5 mb-0 list-disc pl-4 space-y-0.5 text-muted">
+                          {noteLines(value).map(id => (
+                            <li key={id}>{NOTE_LABEL[id]}</li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </details>
+                )}
               </dd>
             </div>
           ))}
@@ -552,11 +792,12 @@ export function AgentBackendTab() {
           (`ACP_BACKENDS_HOST_AUTH_CALLBACK`), so the card is offered exactly when
           KAS is: on a build or policy that hides that option there is nothing to
           sign in for, and a chooser there would be a sign-in to nothing. Keyed on
-          `visible` — the same set the rows above render — so the switch and the
-          card cannot disagree about whether KAS is on offer. Gated on KAS being
-          OFFERED rather than SELECTED, so the user can sign in first and switch
-          second instead of paying one "not signed in" turn to find the card.
-          Isolated so a throwing card cannot take the switch down with it. */}
+          `visible` — the set the switch OFFERS, not the wider set it describes, so
+          a harness that is only described never draws a sign-in for an option
+          nobody can pick. Gated on KAS being OFFERED rather than SELECTED, so the
+          user can sign in first and switch second instead of paying one "not
+          signed in" turn to find the card. Isolated so a throwing card cannot take
+          the switch down with it. */}
       {visible.includes(KIRO_SIGN_IN_BACKEND) && (
         <ErrorBoundary scope="developer-kiro-sign-in" fallback={null}>
           <KiroSignInCard />

@@ -4456,7 +4456,7 @@
       "feature_previews_moved": "Feature Previews moved to Settings > Developer",
       "tabs": {
         "agentBackend": {
-          "description": "Which agent new sessions start — Kiro CLI, Claude Code, or KAS",
+          "description": "Which agent new sessions start",
           "label": "Agent Backend"
         },
         "archive": {

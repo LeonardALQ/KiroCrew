@@ -8,7 +8,10 @@ direct dependencies on the backend packages while the rest of the SDK is built.
 Which backends this build can serve, and every capability set a harness may
 claim, live in :mod:`kiro_crew.agent_sdk.backends`; the per-session record a
 consumer asks instead of naming a harness is
-:class:`kiro_crew.agent_sdk.capabilities.SessionCapabilities`. Whether a harness's
+:class:`kiro_crew.agent_sdk.capabilities.SessionCapabilities`. What an operator
+choosing BETWEEN harnesses is shown -- the same memberships projected as one card
+per harness, with no per-harness prose -- is
+:mod:`kiro_crew.agent_sdk.backend_cards`. Whether a harness's
 tool calls reach the PreToolUse gate is :mod:`kiro_crew.agent_sdk.tool_gate`.
 
 Machine-local backend readiness lives in :mod:`kiro_crew.agent_sdk.backend_install`.
@@ -59,6 +62,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
+# One name, because one name has a consumer: the dashboard handler that serves
+# ``GET /api/acp-backends``. The record types and the per-id projection stay inside
+# :mod:`kiro_crew.agent_sdk.backend_cards`, which is where the tests about them
+# reach for them -- a facade export nobody imports is a promise this boundary would
+# have to keep for no one.
+from kiro_crew.agent_sdk.backend_cards import card_payload
 from kiro_crew.agent_sdk.backend_install import (
     CACHE_TTL_SECONDS,
     COMPONENT_CLAUDE_ACP_ADAPTER,
@@ -127,6 +136,7 @@ __all__ = [
     "UNKNOWN_BACKEND_CAPABILITIES",
     "capabilities_for",
     "capabilities_of",
+    "card_payload",
     "UNKNOWN_AGENT_AUTH",
     "AgentAuthDeclaration",
     "AgentInteractiveLogin",

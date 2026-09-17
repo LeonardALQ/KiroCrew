@@ -10829,6 +10829,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "Agent-Backend",
+        "approval_agent_spec": "Fragt vor jedem Werkzeug, weil {{productName}} es so vorgibt.",
+        "approval_seeded_settings": "Fragt vor jedem Werkzeug nur, wenn die eigenen Einstellungen es sagen. {{productName}} schreibt diese Einstellung und kann ihre Wirkung nicht bestätigen.",
+        "approval_session_config": "Fragt vor jedem Werkzeug. {{productName}} schaltet das ein und prüft es.",
+        "approval_unverified": "Nichts belegt, dass dieser Agent vor einem Werkzeug fragt.",
+        "approval_verified_gate_extension": "Fragt vor jedem Werkzeug über eine Erweiterung, die {{productName}} lädt und prüft.",
+        "approval_verified_seeded_settings": "Fragt vor jedem Werkzeug. {{productName}} setzt das und liest es zurück.",
+        "card_available": "Verfügbar.",
+        "card_crew_tools": "{{productName}}-Tools funktionieren im Chat",
+        "card_manual_compact": "Der Befehl /compact funktioniert",
+        "card_markdown_agents": "Agenten als einzelne Markdown-Datei funktionieren",
+        "card_member_saved_agent": "Crew-Mitglieder laden ihren ganzen gespeicherten Agenten",
+        "card_member_thread_tools": "Crew-Mitglieder-Chats erhalten Sitzungstools",
+        "card_mid_turn_steer": "Du kannst während der Arbeit eine Nachricht senden",
+        "card_model_switch": "Das Modell lässt sich im Chat wechseln",
+        "card_not_available": "Nicht verfügbar.",
+        "card_operator_notes": "Gut zu wissen",
+        "card_private_member_sessions": "Private Mitglieder-Chats können starten",
+        "card_reasoning_effort": "Der Denkaufwand lässt sich ändern",
+        "card_side_chat_tools": "Side Chat kann Werkzeuge nur zum Lesen ausführen",
+        "card_subagent_continuation": "Ein Subagent-Chat kann später fortgesetzt werden",
+        "card_supports_n_of_m": "{{name}} unterstützt {{available}} von {{total}}",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code fragt normalerweise nach, bevor es handelt, und {{productName}} prüft diese Anfrage. Ein in Claudes eigenen Einstellungen vorab genehmigtes Tool — auch über eine .claude/settings.json im Projekt — fragt jedoch nicht, sodass die Ablehnungsregeln und das Audit-Log diesen Aufruf nicht sehen.",
         "could_not_load_the_agent_backend": "Das Agent-Backend konnte nicht geladen werden.",
@@ -10843,6 +10864,15 @@
         "missing_components": "Auf diesem Rechner fehlt: {{components}}",
         "missing_components_with_command": "Auf diesem Rechner fehlt: {{components}}. Installieren mit: {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "Neue Sitzungen verwenden diesen Agenten. Eine bereits geöffnete Sitzung behält den Agenten, mit dem sie gestartet ist – ein Wechsel hier ändert sie nicht mitten in der Sitzung.",
+        "not_offered_by_this_build": "Dieser Build bietet diesen Agenten nicht an.",
+        "note_crew_command_channel": "Slash-Befehle laufen über den Befehlskanal von {{productName}}.",
+        "note_crew_sandbox_stands_down": "Läuft in seiner eigenen Sandbox, daher tritt die Sandbox von {{productName}} dafür zurück.",
+        "note_harness_model_list": "Die Modellliste kommt vom Agenten, nicht von {{productName}}.",
+        "note_host_credential_to_child": "{{productName}} gibt diesem Agenten die eigene Anmeldung weiter.",
+        "note_keeps_own_chat_record": "Dieser Agent behält eine eigene Kopie des Chats.",
+        "note_own_credential_store": "Meldet sich mit einer eigenen Datei an, nicht über die Anmeldung von {{productName}}.",
+        "note_pod_home_relocated": "In einem Pod wandert der Home-Ordner in den Pod, und die gespeicherte Anmeldung wandert mit.",
+        "note_refuses_unclassified_tools": "Ein Tool-Aufruf ohne erkennbaren Namen wird abgelehnt, nicht genehmigt.",
         "retry": "Erneut versuchen",
         "set_is_fixed_at_gateway_start": "Welche Agenten hier erscheinen, wird beim Start des Gateways festgelegt. Eine verwaltete Installation kann die Auswahl per Richtlinie einschränken; Änderungen an dieser Richtlinie greifen beim nächsten Start."
       },
@@ -10894,7 +10924,7 @@
       "feature_previews_moved": "Funktionsvorschauen sind jetzt unter Einstellungen > Entwickler",
       "tabs": {
         "agentBackend": {
-          "description": "Welchen Agenten neue Sitzungen starten – Kiro CLI, Claude Code oder KAS",
+          "description": "Welchen Agenten neue Sitzungen starten",
           "label": "Agent-Backend"
         },
         "archive": {

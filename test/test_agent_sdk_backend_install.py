@@ -38,6 +38,7 @@ from kiro_crew.acp_backends import (
     ACP_BACKEND_PI,
     ACP_BACKENDS_KNOWN,
 )
+from kiro_crew.agent_sdk import backend_cards
 from kiro_crew.agent_sdk import backend_install as probe
 from kiro_crew.agent_sdk import host_auth
 
@@ -787,11 +788,28 @@ class TestEndpointPayloadShape:
                 "install_command",
                 "restart_required",
                 "auth",
+                # The capability card, spread into the row rather than nested:
+                # each of these four is read on its own by the panel. What each
+                # line MEANS is pinned in ``test_backend_cards``; this file pins
+                # that the row carries them.
+                "capabilities",
+                "security_notes",
+                "operator_notes",
+                "tool_approval",
+                "offered_by_build",
             }
             # Sign-in is the harness's own third fact, so every row carries it --
             # including a row whose harness this build cannot serve, which is the
             # one an operator is most likely to be asking about.
             assert set(row["auth"]) == {"sign_in_remedy", "signs_in_separately"}
+            # Every row carries the WHOLE card, including a harness this build
+            # cannot serve: an operator comparing two harnesses is reading the
+            # same questionnaire for each, and a row short of a line would make
+            # the two incomparable with nothing to say so.
+            assert [entry["id"] for entry in row["capabilities"]] == [
+                spec.id for spec in backend_cards.USER_FACING_LINES
+            ]
+            assert isinstance(row["tool_approval"], str) and row["tool_approval"]
 
         by_policy = {r["policy_id"]: r for r in rows}
         assert by_policy["kiro"] == {
@@ -810,6 +828,12 @@ class TestEndpointPayloadShape:
                 "sign_in_remedy": host_auth.declaration_for("").sign_in_remedy,
                 "signs_in_separately": False,
             },
+            # Compared against the projection for the same reason: the card is
+            # DERIVED from capability membership, so a literal copy here would
+            # pin today's memberships and read a deliberate capability change as
+            # a wire break. What this asserts is that the row carries the
+            # projection unaltered -- the handler adds nothing and drops nothing.
+            **backend_cards.card_payload(ACP_BACKEND_KIRO),
         }
         # Not selectable in this build AND not installed here -- both facts on
         # one row, which is the whole reason the endpoint exists.

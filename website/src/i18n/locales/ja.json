@@ -10672,6 +10672,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "エージェントバックエンド",
+        "approval_agent_spec": "{{productName}} がそう指定するため、ツールごとに確認します。",
+        "approval_seeded_settings": "自分の設定でそう決まっている場合だけ、ツールごとに確認します。{{productName}} はその設定を書き込みますが、効いたかどうかは確認できません。",
+        "approval_session_config": "ツールごとに確認します。{{productName}} がその設定を入れ、確認します。",
+        "approval_unverified": "このエージェントがツールの前に確認するという裏づけはありません。",
+        "approval_verified_gate_extension": "{{productName}} が読み込んで確認する拡張を通して、ツールごとに確認します。",
+        "approval_verified_seeded_settings": "ツールごとに確認します。{{productName}} がその設定を入れ、読み返します。",
+        "card_available": "利用できます。",
+        "card_crew_tools": "{{productName}} のツールがチャットで使えます",
+        "card_manual_compact": "/compact コマンドが使えます",
+        "card_markdown_agents": "markdown 1 ファイルで書いたエージェントが動きます",
+        "card_member_saved_agent": "メンバーは保存したエージェントをそのまま読み込めます",
+        "card_member_thread_tools": "メンバーのチャットにセッション用ツールが入ります",
+        "card_mid_turn_steer": "作業中でもメッセージを追加できます",
+        "card_model_switch": "チャットの中でモデルを切り替えられます",
+        "card_not_available": "利用できません。",
+        "card_operator_notes": "知っておくこと",
+        "card_private_member_sessions": "メンバーの非公開チャットを開始できます",
+        "card_reasoning_effort": "思考の深さを変更できます",
+        "card_side_chat_tools": "Side Chat で読み取り専用のツールを実行できます",
+        "card_subagent_continuation": "サブエージェントのチャットは後から続けられます",
+        "card_supports_n_of_m": "{{name}} は {{total}} 件のうち {{available}} 件に対応",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code は通常、実行前に承認を求め、{{productName}} がその要求を審査します。しかし Claude 自身の設定（プロジェクト内の .claude/settings.json を含む）で事前承認されたツールは要求を出さないため、拒否ルールと監査ログはその呼び出しを認識しません。",
         "could_not_load_the_agent_backend": "エージェントバックエンドを読み込めませんでした。",
@@ -10686,6 +10707,15 @@
         "missing_components": "このマシンにありません: {{components}}",
         "missing_components_with_command": "このマシンにありません: {{components}}。次でインストールします: {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "新しいセッションはこのエージェントを使用します。すでに開いているセッションは開始時のエージェントを維持し、ここで切り替えてもセッション中に変わることはありません。",
+        "not_offered_by_this_build": "このビルドはこのエージェントを提供しません。",
+        "note_crew_command_channel": "スラッシュコマンドは {{productName}} のコマンド経路を通ります。",
+        "note_crew_sandbox_stands_down": "自分専用の隔離環境で動くため、{{productName}} 側の隔離は行いません。",
+        "note_harness_model_list": "モデルの一覧は {{productName}} ではなくエージェントから来ます。",
+        "note_host_credential_to_child": "{{productName}} は自分のサインインをこのエージェントに渡します。",
+        "note_keeps_own_chat_record": "このエージェントは会話の記録を自分でも持ちます。",
+        "note_own_credential_store": "{{productName}} のサインインではなく、自分のファイルでサインインします。",
+        "note_pod_home_relocated": "ポッド内ではホームフォルダーがポッド側へ移り、保存済みのサインインも一緒に移ります。",
+        "note_refuses_unclassified_tools": "種類を判別できないツール呼び出しは、承認せずに拒否します。",
         "retry": "再試行",
         "set_is_fixed_at_gateway_start": "ここに表示されるエージェントは gateway の起動時に決まります。管理された環境ではポリシーで対象を制限できます。ポリシーの変更は次回の起動時に反映されます。"
       },
@@ -10737,7 +10767,7 @@
       "feature_previews_moved": "機能プレビューは「設定 > デベロッパー」に移動しました",
       "tabs": {
         "agentBackend": {
-          "description": "新しいセッションが起動するエージェント — Kiro CLI、Claude Code、KAS",
+          "description": "新しいセッションが起動するエージェント",
           "label": "エージェントバックエンド"
         },
         "archive": {

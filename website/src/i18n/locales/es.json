@@ -10986,6 +10986,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "Backend del agente",
+        "approval_agent_spec": "Pregunta antes de cada herramienta porque {{productName}} se lo indica.",
+        "approval_seeded_settings": "Pregunta antes de cada herramienta solo si su propia configuración lo dice. {{productName}} escribe ese ajuste y no puede confirmar que surtió efecto.",
+        "approval_session_config": "Pregunta antes de cada herramienta. {{productName}} lo activa y lo comprueba.",
+        "approval_unverified": "Nada demuestra que este agente pregunte antes de usar una herramienta.",
+        "approval_verified_gate_extension": "Pregunta antes de cada herramienta mediante un complemento que {{productName}} carga y comprueba.",
+        "approval_verified_seeded_settings": "Pregunta antes de cada herramienta. {{productName}} lo activa y lo vuelve a leer.",
+        "card_available": "Disponible.",
+        "card_crew_tools": "Las herramientas de {{productName}} funcionan en el chat",
+        "card_manual_compact": "El comando /compact funciona",
+        "card_markdown_agents": "Funcionan los agentes escritos en un solo archivo markdown",
+        "card_member_saved_agent": "Los miembros cargan todo su agente guardado",
+        "card_member_thread_tools": "Los chats de miembros reciben herramientas de sesión",
+        "card_mid_turn_steer": "Puedes enviar un mensaje mientras trabaja",
+        "card_model_switch": "El modelo se puede cambiar dentro del chat",
+        "card_not_available": "No disponible.",
+        "card_operator_notes": "Conviene saber",
+        "card_private_member_sessions": "Los chats privados de miembros pueden iniciarse",
+        "card_reasoning_effort": "El esfuerzo de razonamiento se puede cambiar",
+        "card_side_chat_tools": "Side Chat puede usar herramientas de solo lectura",
+        "card_subagent_continuation": "Un chat de subagente puede retomarse más tarde",
+        "card_supports_n_of_m": "{{name}} admite {{available}} de {{total}}",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code normalmente pide permiso antes de actuar, y {{productName}} filtra esa solicitud. Pero una herramienta aprobada previamente en la configuración propia de Claude — incluido un .claude/settings.json dentro del proyecto — no pregunta, así que las reglas de denegación y el registro de auditoría no ven esa llamada.",
         "could_not_load_the_agent_backend": "No se pudo cargar el backend del agente.",
@@ -11000,6 +11021,15 @@
         "missing_components": "Falta en esta máquina: {{components}}",
         "missing_components_with_command": "Falta en esta máquina: {{components}}. Instálalo con: {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "Las sesiones nuevas usan este agente. Una sesión ya abierta conserva el agente con el que se inició: cambiarlo aquí no la modifica a mitad de sesión.",
+        "not_offered_by_this_build": "Esta compilación no ofrece este agente.",
+        "note_crew_command_channel": "Los comandos con barra viajan por el canal de comandos de {{productName}}.",
+        "note_crew_sandbox_stands_down": "Se ejecuta en su propio entorno aislado, así que el aislamiento de {{productName}} se retira para él.",
+        "note_harness_model_list": "La lista de modelos viene del agente, no de {{productName}}.",
+        "note_host_credential_to_child": "{{productName}} entrega a este agente su propio inicio de sesión.",
+        "note_keeps_own_chat_record": "Este agente guarda su propia copia de la conversación.",
+        "note_own_credential_store": "Inicia sesión con su propio archivo, no con el inicio de sesión de {{productName}}.",
+        "note_pod_home_relocated": "Dentro de un pod, su carpeta personal se traslada al pod, y su inicio de sesión guardado va con ella.",
+        "note_refuses_unclassified_tools": "Una llamada de herramienta que no puede identificar se rechaza, no se aprueba.",
         "retry": "Reintentar",
         "set_is_fixed_at_gateway_start": "Qué agentes aparecen aquí se decide al iniciar el gateway. Una implementación gestionada puede restringir el conjunto por política; editar esa política surte efecto en el siguiente inicio."
       },
@@ -11051,7 +11081,7 @@
       "feature_previews_moved": "Las vistas previas de funciones se movieron a Configuración > Desarrollador",
       "tabs": {
         "agentBackend": {
-          "description": "Qué agente inician las sesiones nuevas: Kiro CLI, Claude Code o KAS",
+          "description": "Qué agente inician las sesiones nuevas",
           "label": "Backend del agente"
         },
         "archive": {

@@ -10829,6 +10829,27 @@
     "developer": {
       "agentBackendTab": {
         "agent_backend": "এজেন্ট ব্যাকএন্ড",
+        "approval_agent_spec": "প্রতিটি টুলের আগে জিজ্ঞেস করে, কারণ {{productName}} তাই ঠিক করে দেয়।",
+        "approval_seeded_settings": "নিজের সেটিংস তাই বললে তবেই প্রতিটি টুলের আগে জিজ্ঞেস করে। {{productName}} সেই সেটিং লেখে, কিন্তু তা কাজে লেগেছে কিনা নিশ্চিত করতে পারে না।",
+        "approval_session_config": "প্রতিটি টুলের আগে জিজ্ঞেস করে। {{productName}} সেটি চালু করে ও যাচাই করে।",
+        "approval_unverified": "এই এজেন্ট টুল চালানোর আগে জিজ্ঞেস করে, এমন কোনও প্রমাণ নেই।",
+        "approval_verified_gate_extension": "{{productName}} যে অ্যাড-অন লোড করে যাচাই করে, তার মাধ্যমে প্রতিটি টুলের আগে জিজ্ঞেস করে।",
+        "approval_verified_seeded_settings": "প্রতিটি টুলের আগে জিজ্ঞেস করে। {{productName}} সেটি বসায় ও পড়ে যাচাই করে।",
+        "card_available": "পাওয়া যায়।",
+        "card_crew_tools": "{{productName}} এর নিজের টুল চ্যাটে কাজ করে",
+        "card_manual_compact": "/compact কমান্ড কাজ করে",
+        "card_markdown_agents": "একটি markdown ফাইলে লেখা এজেন্ট কাজ করে",
+        "card_member_saved_agent": "সদস্যরা তাঁদের পুরো সংরক্ষিত এজেন্ট লোড করেন",
+        "card_member_thread_tools": "সদস্যের চ্যাটে সেশন টুল যুক্ত হয়",
+        "card_mid_turn_steer": "কাজ চলার সময়েও বার্তা পাঠানো যায়",
+        "card_model_switch": "চ্যাটের ভেতরেই মডেল বদলানো যায়",
+        "card_not_available": "পাওয়া যায় না।",
+        "card_operator_notes": "জেনে রাখা ভালো",
+        "card_private_member_sessions": "সদস্যের ব্যক্তিগত চ্যাট শুরু করা যায়",
+        "card_reasoning_effort": "ভাবনার গভীরতা বদলানো যায়",
+        "card_side_chat_tools": "Side Chat শুধু পড়ার টুল চালাতে পারে",
+        "card_subagent_continuation": "সাব-এজেন্টের চ্যাট পরে আবার চালানো যায়",
+        "card_supports_n_of_m": "{{name}} {{total}} টির মধ্যে {{available}} টি সমর্থন করে",
         "claude_code": "Claude Code",
         "claude_uses_its_own_permissions": "Claude Code সাধারণত কাজ করার আগে অনুমতি চায়, এবং {{productName}} সেই অনুরোধ যাচাই করে। কিন্তু Claude-এর নিজের সেটিংসে আগেই অনুমোদিত টুল — প্রকল্পের ভিতরের .claude/settings.json সহ — কিছু জিজ্ঞাসা করে না, তাই অস্বীকৃতির নিয়ম ও অডিট লগ সেই কলটি দেখতে পায় না।",
         "could_not_load_the_agent_backend": "এজেন্ট ব্যাকএন্ড লোড করা যায়নি।",
@@ -10843,6 +10864,15 @@
         "missing_components": "এই মেশিনে অনুপস্থিত: {{components}}",
         "missing_components_with_command": "এই মেশিনে অনুপস্থিত: {{components}}। ইনস্টল করুন: {{command}}",
         "new_sessions_use_this_agent_a_session_that_is_al": "নতুন সেশনগুলি এই এজেন্ট ব্যবহার করে। ইতিমধ্যে খোলা সেশন যে এজেন্টে শুরু হয়েছিল সেটিই ধরে রাখে — এখানে বদলালে চলমান সেশন বদলায় না।",
+        "not_offered_by_this_build": "এই বিল্ড এই এজেন্ট দেয় না।",
+        "note_crew_command_channel": "স্ল্যাশ কমান্ড {{productName}} এর কমান্ড চ্যানেল দিয়ে যায়।",
+        "note_crew_sandbox_stands_down": "এটি নিজের আলাদা ঘেরে চলে, তাই {{productName}} এর ঘের এর জন্য সরে যায়।",
+        "note_harness_model_list": "মডেলের তালিকা আসে এজেন্ট থেকে, {{productName}} থেকে নয়।",
+        "note_host_credential_to_child": "{{productName}} নিজের সাইন-ইন এই এজেন্টের হাতে তুলে দেয়।",
+        "note_keeps_own_chat_record": "এই এজেন্ট আলাপের নিজস্ব একটি কপি রাখে।",
+        "note_own_credential_store": "এটি {{productName}} এর সাইন-ইন নয়, নিজের ফাইল দিয়ে সাইন ইন করে।",
+        "note_pod_home_relocated": "পডের ভিতরে এর হোম ফোল্ডার পডে সরে যায়, আর সংরক্ষিত সাইন-ইনও সঙ্গে যায়।",
+        "note_refuses_unclassified_tools": "যে টুল কলের ধরন চেনা যায় না, তা অনুমোদন নয়, বাতিল করা হয়।",
         "retry": "আবার চেষ্টা করুন",
         "set_is_fixed_at_gateway_start": "এখানে কোন এজেন্টগুলি দেখা যাবে তা gateway চালু হওয়ার সময় নির্ধারিত হয়। পরিচালিত ডিপ্লয়মেন্ট নীতির মাধ্যমে এই সেট সীমিত করতে পারে; নীতি সম্পাদনা পরবর্তী চালুর সময় কার্যকর হয়।"
       },
@@ -10894,7 +10924,7 @@
       "feature_previews_moved": "ফিচার প্রিভিউ এখন সেটিংস > ডেভেলপার-এ আছে",
       "tabs": {
         "agentBackend": {
-          "description": "নতুন সেশন কোন এজেন্ট চালু করে — Kiro CLI, Claude Code বা KAS",
+          "description": "নতুন সেশন কোন এজেন্ট চালু করে",
           "label": "এজেন্ট ব্যাকএন্ড"
         },
         "archive": {

@@ -5,7 +5,7 @@ One row per backend id in ``acp_backends.ACP_BACKENDS_KNOWN``, sorted by
 switch lists all of them and must be able to say which is which, so an
 unservable backend needs a row rather than silent absence.
 
-Three facts per row, from three owners that must not be conflated:
+Four facts per row, from four owners that must not be conflated:
 
 * ``selectable`` -- build capability AND deployment policy, read from
   ``handlers.core._selectable_acp_backends()``. That helper is already the
@@ -26,6 +26,19 @@ Three facts per row, from three owners that must not be conflated:
   error. Nothing here READS a credential: the declaration is static data, so the
   row says which store holds the entitlement and what to run, and never that a
   particular harness is currently signed in.
+* the CARD -- ``capabilities``, ``security_notes``, ``operator_notes``,
+  ``tool_approval`` and ``offered_by_build``, projected from the harness's own
+  capability memberships
+  by :mod:`kiro_crew.agent_sdk.backend_cards`. This is the question the other
+  three cannot answer: an operator is choosing between harnesses, and
+  selectability plus install state say only whether a choice is available, never
+  what it costs. The projection is spread into the row rather than nested under
+  one key, because each of those four is a field the panel reads on its own.
+
+  The classification -- which memberships are user-facing, which are operator
+  notes, and which reach no card at all -- belongs to the projection and not to
+  this handler or to the panel. A second place deciding it is a second place that
+  can disagree about what a line means.
 
 Owner-only, and the snapshot is offloaded: the Claude probe shells out to mise
 and walks the filesystem, and resolving the governance ceiling loads config, so
@@ -101,6 +114,7 @@ def _snapshot() -> List[Dict[str, Any]]:
     from kiro_crew.agent_sdk import (
         INSTALLED,
         MISSING,
+        card_payload,
         declaration_for,
         probe_backends,
         signs_in_separately,
@@ -146,6 +160,12 @@ def _snapshot() -> List[Dict[str, Any]]:
                     "sign_in_remedy": auth.sign_in_remedy,
                     "signs_in_separately": signs_in_separately(state.backend),
                 },
+                # The card. Every line is keyed by a machine id whose LABEL is the
+                # panel's, phrased once per capability -- the opposite trade from
+                # ``sign_in_remedy`` above, and the reason it can be translated at
+                # all: a capability label is reused by every harness, so a new
+                # harness costs no locale edit while a new LINE costs thirteen.
+                **card_payload(state.backend),
             }
         )
     return rows

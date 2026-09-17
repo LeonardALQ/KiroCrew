@@ -1275,6 +1275,58 @@ export interface AcpBackendProbe {
     sign_in_remedy: string
     signs_in_separately: boolean
   }
+  /**
+   * The capability card: what this harness can do, projected on the server from
+   * the capability memberships it already declared
+   * (`agent_sdk/backend_cards.py`). OPTIONAL, like `auth`, because a gateway
+   * that predates it sends none and the panel says nothing about what it was
+   * not told.
+   *
+   * A LIST and not a map, so the SERVER owns the order: a new line appears in
+   * the right place with no edit here. `id` is a stable machine key and the
+   * LABEL is this frontend's, which is what makes the labels translatable at
+   * all -- a label is written once per capability and every harness reuses it.
+   * An id with no label here is SKIPPED rather than rendered raw, the opposite
+   * of the `policy_id` fallback for a name: a bare `private_memory_mcp` in
+   * front of a reader is worse than one line fewer, while a chip with no text
+   * at all is worse than a policy id.
+   */
+  capabilities?: { id: string; available: boolean }[]
+  /**
+   * Ids of the SECURITY notes that hold for this harness: which layer confines
+   * the agent, whether Crew hands its own credential to the child, how an
+   * unclassifiable approval is answered.
+   *
+   * A separate list from `operator_notes` because the panel renders them in two
+   * places. These go OUTSIDE every disclosure, beside `tool_approval`: "Crew's
+   * sandbox is not confining this child" is as material as how the harness is
+   * made to ask, and a fact behind a closed disclosure is one an operator
+   * comparing harnesses does not see. The split is the SERVER's, so this frontend
+   * cannot promote or bury a note by accident.
+   */
+  security_notes?: string[]
+  /**
+   * Ids of the where-it-lives notes that hold: whose disk holds the transcript,
+   * which side supplies the model list, which channel carries a command. Ids
+   * only, because a note is either raised or absent -- "this harness does not
+   * relocate its home on a pod" is not a line anyone reads.
+   */
+  operator_notes?: string[]
+  /**
+   * How this harness is made to ask before it runs a tool: the core's own
+   * `Routing` value, as the string. The one GRADED line on the card, and the
+   * reason the card is otherwise two-level -- a membership set carries one bit,
+   * while this enum already names five mechanisms and one "not established".
+   */
+  tool_approval?: string
+  /**
+   * Whether the BUILD offers this harness as a choice, before deployment policy
+   * narrows anything. False means known-but-never-offered, which is a different
+   * state from policy-denied and is the one the panel shows rather than hides:
+   * a policy denial is not the reader's to fix, and a build exclusion is a
+   * standing fact the tool-approval line explains.
+   */
+  offered_by_build?: boolean
 }
 
 let _sessionExpiredShown = false
