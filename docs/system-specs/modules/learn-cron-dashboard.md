@@ -1209,6 +1209,47 @@ condition: a boundary where no successor dispatches (empty queue, dropped
 entry, synthesis not eligible) emits nothing here -- `_finish_queue_cycle`'s
 `chat_done` stays that path's sole finalizer, so no path double-finalizes.
 
+### Agent welcome message (`welcomeMessage`)
+
+An agent spec may carry `welcomeMessage` -- a usage hint its author wants read
+when that agent starts answering. `agent_discovery.agent_welcome_message` is its
+ONE reader (the field previously had none: it was accepted, shipped by the
+bundled `pptx_maker` agents, and rendered nowhere), and
+`chat_runner._surface_agent_welcome` its one emitter. Two activation points feed
+it: a cold session start on a non-empty `slot.agent` (`is_new` from
+`sessions.get_or_create`), and a provider-side `EVENT_AGENT_SWITCHED`, where the
+hint is appended immediately AFTER the `Switched to agent: <name>` row so the
+two read in causal order.
+
+The row is `role="notice"`, and that choice carries three properties:
+`notice` is outside `_TRANSIENT_ROLES`, so the hint persists and survives a
+reload (the issue asks for a transcript entry, not an ephemeral banner); it is
+neither `user` nor `assistant`, so the history replay never feeds it back to the
+model -- inlining the hint into the system prompt is the workaround this
+replaces, and that one is re-sent every turn; and `NoticeCard` renders a
+`notice` row as plain text, never markdown or HTML, so agent-config copy cannot
+render as instructions.
+
+ONE SHOT PER ACTIVATION, via `slot._welcomed_agent`. A switch and the cold start
+its own session reset produces are two events for a single activation, so both
+call sites clear through that field rather than each guessing whether the other
+already ran; it is claimed BEFORE the offloaded read, so racing events cannot
+both pass, and a read that FAILED is recorded as welcomed too (a broken agents
+directory must not re-scan on every later event). Switching to a different agent
+and back does emit again -- the guard is per activation, not per slot lifetime.
+The field is not persisted: the row is, and a re-emit after a gateway restart
+costs one duplicated notice rather than a per-turn repeat.
+
+Resolution mirrors `list_agents`: project scope shadows the user-level agents
+directory, and within a scope a spec DECLARING `name == agent` outranks one that
+merely has the matching filename. Absent, empty, whitespace-only and non-string
+values all render nothing (`spec_str`'s rule -- the directory is shared with
+other tools that spell fields freely); the text is truncated at
+`WELCOME_MESSAGE_MAX_CHARS` (2000) with an ellipsis and passed through
+`_redact_display_text`, because it is untrusted config data reaching a persisted
+window and every open tab. The read is offloaded (`asyncio.to_thread`) and total:
+an unreadable spec renders nothing rather than failing the turn.
+
 ### Mid-Turn Steer (dashboard transcript contract)
 
 A steer (`POST /api/chat` with `steer: true` while the slot is running) injects

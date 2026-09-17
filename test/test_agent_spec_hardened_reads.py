@@ -895,6 +895,11 @@ _EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
     ],
     "kiro_crew/agent_capabilities.py": [("capability_publish", "dashboard")],
     "kiro_crew/agent_discovery.py": [
+        # ``agent_welcome_message`` reads the PROJECT checkout's specs itself
+        # (project scope shadows the user level, as `list_agents` resolves it),
+        # so it names the hint read rather than forwarding: a refused checkout
+        # spec is attributed to the greeting, not to whichever surface asked.
+        ("agent_welcome_message", "unknown"),
         ("forward:operation", "forward:source"),
         ("forward:operation", "forward:source"),
         # ``spec_by_declared_name`` scans specs it did not name for whichever
@@ -1058,7 +1063,10 @@ def _labelled_call_sites(target: str) -> dict[str, list[tuple[str | None, str | 
 # surface triggered a denial. Callers therefore name themselves at the call
 # site, and the wrapper's own `_read_agent_spec` call is pinned as forwarding.
 _EXPECTED_PARSED_SPECS_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
-    "kiro_crew/agent_discovery.py": [("agent_skill_globs", "unknown")],
+    "kiro_crew/agent_discovery.py": [
+        ("agent_skill_globs", "unknown"),
+        ("agent_welcome_message", "unknown"),
+    ],
     "kiro_crew/dashboard/handlers/_shared.py": [("skills_loaded_by_agents", "dashboard")],
 }
 

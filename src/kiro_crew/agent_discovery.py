@@ -1002,6 +1002,85 @@ def agent_skill_globs(agent: str, agents_dir: Path | None = None) -> list[str]:
     return []
 
 
+#: Ceiling on a ``welcomeMessage`` rendered into a chat transcript. The field is
+#: authored in a user-writable, tool-shared directory, so its length is not a
+#: trusted quantity: an unbounded value would be persisted into the slot window
+#: and re-broadcast to every open tab on each restore. Truncated rather than
+#: refused — a long hint is still the author's intent, and dropping it silently
+#: reproduces exactly the "accepted but invisible" behaviour this reader exists
+#: to remove.
+WELCOME_MESSAGE_MAX_CHARS = 2000
+
+
+def spec_welcome_message(data: dict[str, Any]) -> str:
+    """The display-ready ``welcomeMessage`` of a parsed agent spec, or ``""``.
+
+    Coerced through :func:`spec_str` for the reason documented there: this key
+    is read from ``~/.kiro/agents``, a directory other tools also write, so a
+    structured or ``null`` value is "absent" rather than an error. Surrounding
+    whitespace is stripped and a whitespace-only value collapses to ``""``, so
+    a blank hint renders nothing instead of an empty bubble.
+
+    Truncated at :data:`WELCOME_MESSAGE_MAX_CHARS` with an ellipsis, so the
+    caller can append the result without re-checking its size.
+    """
+    text = spec_str(data, "welcomeMessage").strip()
+    if len(text) > WELCOME_MESSAGE_MAX_CHARS:
+        text = text[:WELCOME_MESSAGE_MAX_CHARS].rstrip() + "\u2026"
+    return text
+
+
+def agent_welcome_message(
+    agent: str,
+    *,
+    project: str | Path | None = None,
+    agents_dir: Path | None = None,
+) -> str:
+    """*agent*'s ``welcomeMessage`` as display-ready text, or ``""``.
+
+    The one reader of the field. Blocking (it scans agent directories), so an
+    event-loop caller must offload it — the dashboard chat runner does.
+
+    Resolution mirrors :func:`list_agents`, so the hint comes from the same
+    spec the agent picker showed and the backend will actually run: *project*
+    scope SHADOWS the user-level directory (a checkout's spec is the one
+    kiro-cli resolves ``--agent`` against), and within a scope a spec that
+    DECLARES ``name == agent`` wins over one that merely has the matching
+    filename — the two are allowed to differ (see
+    :func:`spec_by_declared_name`). Both scopes are scanned because a checkout
+    can define an agent the user-level directory does not.
+
+    Best-effort and never raises: an unreadable, oversized, sensitive or
+    non-object spec yields ``""``, matching :func:`agent_skill_globs`. A
+    missing hint and an unreadable one are deliberately the same answer — the
+    field is decoration, and no chat turn should fail over it.
+    """
+    if not agent:
+        return ""
+    scopes: list[list[tuple[dict[str, Any], Path]]] = []
+    if project:
+        rows: list[tuple[dict[str, Any], Path]] = []
+        for f in project_agent_files(project):
+            data = _read_agent_spec(f, operation="agent_welcome_message", source="unknown")
+            if data is not None:
+                rows.append((data, f))
+        scopes.append(rows)
+    scopes.append(
+        parsed_agent_specs(agents_dir, operation="agent_welcome_message", source="unknown")
+    )
+    # Declared name first WITHIN a scope, then the stem, then the next scope. A
+    # stem match must not outrank a declared match in the same directory, and
+    # neither may reach past a project spec that shadows both.
+    for rows in scopes:
+        for data, _f in rows:
+            if data.get("name") == agent:
+                return spec_welcome_message(data)
+        for data, f in rows:
+            if f.stem == agent:
+                return spec_welcome_message(data)
+    return ""
+
+
 def _dir_signature(d: Path) -> _ListAgentsSig:
     """Cheap stat-only signature of the agents dir.
 
