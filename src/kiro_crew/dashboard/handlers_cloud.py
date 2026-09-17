@@ -32,6 +32,7 @@ from aiohttp import web
 from kiro_crew.cloud import connect as connect_mod
 from kiro_crew.cloud import ec2, iam
 from kiro_crew.cloud import launch_job as lj
+from kiro_crew.cloud import login as login_mod
 from kiro_crew.cloud import source as source_mod
 from kiro_crew.cloud import ssm
 from kiro_crew.cloud.aws import AWSError, CloudActionDenied
@@ -285,7 +286,11 @@ async def api_cloud_preflight(request: web.Request) -> web.Response:
     plugin_cmd = "" if plugin else await _in_executor(ssm.session_manager_plugin_install_command)
     _audit("preflight", "success")
     return web.json_response(
-        {**reach, "session_manager_plugin": bool(plugin), "session_manager_plugin_command": plugin_cmd}
+        {
+            **reach,
+            "session_manager_plugin": bool(plugin),
+            "session_manager_plugin_command": plugin_cmd,
+        }
     )
 
 
@@ -447,9 +452,7 @@ async def api_cloud_launch_create(request: web.Request) -> web.Response:
     except LoginTargetError as e:
         _audit("launch_create", "denied", error=f"invalid login target: {e}")
         return web.json_response({"error": str(e), "code": "invalid_login_target"}, status=400)
-    provisioner = next(
-        (p for p in await _in_executor(_provisioners) if p.id == provider_id), None
-    )
+    provisioner = next((p for p in await _in_executor(_provisioners) if p.id == provider_id), None)
     if provisioner is None:
         _audit("launch_create", "denied", error=f"unknown provisioner {provider_id!r}")
         return web.json_response(
@@ -565,25 +568,273 @@ async def api_cloud_launch_cancel(request: web.Request) -> web.Response:
     return web.json_response(updated.to_dict())
 
 
+def _preserved_code_may_be_approved(job: lj.LaunchJob) -> bool:
+    """Is this the one shape where the box can be signed in behind our back?
+
+    A sign-in that ran out of time deliberately KEEPS its device code and leaves
+    the remote login polling, so the user can still approve it from the browser
+    tab that is already open. Nothing re-probes the instance after that, so an
+    approval that lands then signs the crew in while the job still reads
+    ``signin_detected=False`` — badged "Needs sign-in" forever, with Connect held.
+
+    True only for: terminal (no worker owns it, so nothing else is writing it),
+    registered with an instance to probe, not already signed in, and still
+    holding the surviving prompt that makes the approval possible. Deliberately
+    narrow — this must never become a blanket poll of every job, and never touch
+    a job a worker is driving.
+    """
+    if not job.terminal or job.signin_detected or not job.instance_id or not job.signin:
+        return False
+    try:
+        return job.step(lj.STEP_CONNECT).state == lj.STEP_DONE
+    except KeyError:  # a provisioner with different steps: nothing to recover
+        return False
+
+
+def _probe_signin_on_box(state: "DashboardState", job: lj.LaunchJob) -> bool:
+    """Ask the instance whether it is signed in. QUERY ONLY -- writes nothing.
+
+    Runs in an executor because it is an SSM round trip of seconds. Deliberately
+    free of mutation: a write here would run on that worker thread, where nothing
+    serialises it against a concurrent restart persisting RUNNING under
+    :func:`_launch_lock`. A re-read narrows that window rather than closing it, so
+    :func:`_record_probed_signin` owns the write -- on the loop, under the lock.
+    """
+    try:
+        return bool(
+            login_mod.is_logged_in(
+                job.instance_id, job.profile, job.region, target=job.login_target
+            )
+        )
+    except Exception:  # noqa: BLE001 - a probe failure is not a launch failure
+        logger.info("could not re-probe the Kiro sign-in for %s", job.id, exc_info=True)
+        return False
+
+
+async def _record_probed_signin(state: "DashboardState", job: lj.LaunchJob) -> bool:
+    """Persist a confirmed out-of-band sign-in, under the launch lock.
+
+    Same lock :func:`_claim_signin` writes under, which is what makes this safe: a
+    restart admitted while the probe was talking to the box has already persisted
+    RUNNING, and this must not put a stale terminal snapshot back over it. Holding
+    the lock across the (fast, local) re-read and save is what serialises them --
+    the SSM round trip stays outside it, in :func:`_probe_signin_on_box`.
+
+    Returns whether the write happened. ``False`` means the job moved on and the
+    probe result is stale, which is not an error: the newer writer wins.
+    """
+    store = await _astore(state)
+    async with _launch_lock(state):
+        fresh = await _in_executor(store.get, job.id)
+        if fresh is None:
+            return False
+        if not _preserved_code_may_be_approved(fresh):
+            logger.info("dropping a stale sign-in probe result for %s: the job moved on", job.id)
+            return False
+        fresh.signin_detected = True
+        fresh.signin = None
+        fresh.step(lj.STEP_SIGNIN).state = lj.STEP_DONE
+        await _in_executor(store.save, fresh)
+        # Keep the caller's object consistent with what was persisted.
+        job.signin_detected = True
+        job.signin = None
+        job.step(lj.STEP_SIGNIN).state = lj.STEP_DONE
+    return True
+
+
 async def api_cloud_launch_signin(request: web.Request) -> web.Response:
     """POST /api/cloud/launch/{id}/signin — fetch the pending device-code prompt.
 
     The job auto-polls for approval; this returns the URL + code to display (and
     409 when no sign-in is pending), so the UI has a dedicated fetch for it.
+
+    A terminal job that still holds a PRESERVED code is re-probed first: nothing
+    else re-checks the box after the job goes terminal, so a code approved out of
+    band left the crew signed in while the job said it was not. The probe runs
+    only on that narrow shape (see :func:`_preserved_code_may_be_approved`) and
+    answers ``signin_already_complete``, with the corrected job, instead of the
+    bare "no sign-in pending" that hid it.
     """
     denied = _guard(request, "launch_signin")
     if denied is not None:
         return denied
-    store = await _astore(request.app["state"])
+    state: "DashboardState" = request.app["state"]
+    store = await _astore(state)
     job = await _in_executor(store.get, request.match_info["id"])
     if job is None:
         return web.json_response({"error": "not found", "code": "launch_job_not_found"}, status=404)
     if job.status != lj.AWAITING_SIGNIN or not job.signin:
+        if _preserved_code_may_be_approved(job):
+            # Query off the loop, write on it under the lock. Both halves must
+            # succeed to report the crew signed in: a probe that says yes but whose
+            # write is dropped means another writer moved the job on, and the
+            # caller must not claim a state that was not persisted.
+            signed = await _in_executor(functools.partial(_probe_signin_on_box, state, job))
+            if signed and await _record_probed_signin(state, job):
+                _audit("launch_signin", "success", request_id=job.id)
+                return web.json_response(
+                    {
+                        "error": "already signed in",
+                        "code": "signin_already_complete",
+                        "job": job.to_dict(),
+                    },
+                    status=409,
+                )
         return web.json_response(
             {"error": "no sign-in pending", "code": "no_signin_pending"}, status=409
         )
     _audit("launch_signin", "success", request_id=job.id)
     return web.json_response({"signin": job.signin.to_dict()})
+
+
+def _claim_signin(state: "DashboardState", job: lj.LaunchJob) -> None:
+    """Persist the job as RUNNING before the lock that admitted it is released.
+
+    :func:`lj.run_signin_retry` writes this transition too, but it runs on the
+    worker — so between this handler returning and that first save, the job file
+    still reads terminal. A second restart request in that window passed the
+    "nothing active" check, and two remote logins raced with one cancel handle
+    between them. The guard is only a guard if the state it reads is already
+    written.
+    """
+    job.step(lj.STEP_SIGNIN).state = lj.STEP_ACTIVE
+    job.status = lj.RUNNING
+    job.signin = None
+    job.signin_detected = False
+    job.error = ""
+    _store(state).save(job)
+
+
+def _start_signin_worker(
+    state: "DashboardState", job: lj.LaunchJob, engine: lj.LaunchEngine
+) -> None:
+    """Run :func:`lj.run_signin_retry` on a daemon thread (inline when ``cloud_launch_sync``)."""
+    store = _store(state)
+    cancel = threading.Event()
+    _cancels(state)[job.id] = cancel
+    # Claim the job for this process, so a later reap_orphans() does not mistake
+    # a sign-in we are actively driving for one abandoned by a restart.
+    store.adopt(job.id)
+
+    def _run() -> None:
+        try:
+            lj.run_signin_retry(job, store, engine, cancel=cancel)
+        finally:
+            _cancels(state).pop(job.id, None)
+
+    if getattr(state, "cloud_launch_sync", False):
+        _run()  # deterministic path for tests
+        return
+    try:
+        threading.Thread(target=_run, name=f"cloud-signin-{job.id}", daemon=True).start()
+    except RuntimeError:
+        # `Thread.start` raises when the process is out of threads. Release only
+        # the in-memory handle here; the on-disk revert is the caller's, because
+        # this function is sync and store I/O belongs off the event loop
+        # (see `_unclaim_signin`).
+        _cancels(state).pop(job.id, None)
+        raise
+
+
+def _unclaim_signin(state: "DashboardState", job: lj.LaunchJob) -> None:
+    """Undo `_claim_signin` after the worker failed to start. Runs in an executor.
+
+    The claim has ALREADY persisted RUNNING, and the only thing that ever moves
+    a job off RUNNING is the worker that failed to exist. Left alone, every later
+    launch and restart answers 409 launch_already_running -- permanently.
+    """
+    store = _store(state)
+    fresh = store.get(job.id) or job
+    fresh.status = lj.FAILED
+    fresh.step(lj.STEP_SIGNIN).state = lj.STEP_FAILED
+    fresh.error = "Could not start the sign-in worker (the gateway is out of threads). Try again."
+    store.save(fresh)
+
+
+async def api_cloud_launch_signin_restart(request: web.Request) -> web.Response:
+    """POST /api/cloud/launch/{id}/signin/restart — start (again) the Kiro sign-in.
+
+    The dashboard's "Sign in" / "Get a new sign-in code" action for a crew whose
+    launch finished without a confirmed sign-in — the code timed out, nobody
+    approved it, or the gateway restarted mid-wait. Re-runs **only** the sign-in
+    step, with the identity stored on the job; the crew itself is left alone and
+    nothing is re-provisioned. 409 while a launch or another sign-in is already
+    running (the guard that keeps one device code live at a time), 400 when the
+    job has no crew to sign in on.
+
+    It cannot change WHICH identity signs in: the job's persisted
+    ``login_target`` is reused, which is the point — an Identity Center crew must
+    never silently get a Builder ID code. A crew launched against the wrong start
+    URL is fixed by deleting it and launching again, since the identity is chosen
+    before the instance exists.
+
+    Owner-only and audited like every other cloud route.
+    """
+    denied = _guard(request, "launch_signin_restart")
+    if denied is not None:
+        return denied
+    state: "DashboardState" = request.app["state"]
+    job_id = request.match_info["id"]
+    # Same lock as create: the "nothing active" check awaits, so two restarts
+    # arriving together would otherwise both pass it and race two remote logins.
+    async with _launch_lock(state):
+        store = await _astore(state)
+        job = await _in_executor(store.get, job_id)
+        if job is None:
+            return web.json_response(
+                {"error": "not found", "code": "launch_job_not_found"}, status=404
+            )
+        if not job.instance_id or job.step(lj.STEP_CONNECT).state != lj.STEP_DONE:
+            _audit("launch_signin_restart", "denied", request_id=job_id, error="no crew")
+            return web.json_response(
+                {
+                    "error": "this setup did not create a crew to sign in on",
+                    "code": "launch_has_no_instance",
+                },
+                status=400,
+            )
+        existing = await _in_executor(store.list)
+        active = next((j for j in existing if not j.terminal), None)
+        if active is not None:
+            _audit("launch_signin_restart", "denied", request_id=job_id, error="already running")
+            return web.json_response(
+                {
+                    "error": "a crew setup or sign-in is already running; wait for it or cancel it",
+                    "code": "launch_already_running",
+                    "job": active.to_dict(),
+                },
+                status=409,
+            )
+        try:
+            engine = _engine(state, job.provider_id)
+        except KeyError:
+            _audit("launch_signin_restart", "denied", request_id=job_id, error="no engine")
+            return web.json_response(
+                {
+                    "error": f"provisioner {job.provider_id!r} has no launch engine",
+                    "code": "unknown_provisioner",
+                },
+                status=400,
+            )
+        await _in_executor(functools.partial(_claim_signin, state, job))
+        try:
+            _start_signin_worker(state, job, engine)
+        except RuntimeError:
+            # Revert the claim off the loop, still under the launch lock that made
+            # it, then tell the caller the truth rather than 202-ing a sign-in that
+            # is not running. Retryable, so 503.
+            await _in_executor(functools.partial(_unclaim_signin, state, job))
+            _audit("launch_signin_restart", "error", request_id=job_id, error="thread start failed")
+            return web.json_response(
+                {
+                    "error": "could not start the sign-in worker; try again",
+                    "code": "signin_worker_unavailable",
+                },
+                status=503,
+            )
+    _audit("launch_signin_restart", "success", request_id=job_id)
+    updated = await _in_executor(store.get, job_id) or job
+    return web.json_response(updated.to_dict(), status=202)
 
 
 def _teardown_after_delete(tag: str, profile: str, region: str, instance_id: str) -> None:
@@ -680,9 +931,7 @@ async def _mutate_instance(request: web.Request, op: str) -> web.Response:
             # as a no-op, resolves no id, and skips the unregister AGAIN, so the row can
             # never be cleared from this panel. The launch job that created this tag
             # persists its instance id: still server-owned state, never caller input.
-            iid = next(
-                (j.instance_id for j in store.list() if j.tag == tag and j.instance_id), ""
-            )
+            iid = next((j.instance_id for j in store.list() if j.tag == tag and j.instance_id), "")
         # destroy: issue the delete and return; do not block the request on
         # DELETE_COMPLETE (minutes). A later status / the reaper reflects it.
         out = ec2.destroy(tag, profile, region, wait=False)
@@ -703,9 +952,7 @@ async def _mutate_instance(request: web.Request, op: str) -> web.Response:
         # without this arm a malformed tag in the URL path becomes a 500 instead of
         # telling the caller what was wrong with their input.
         _audit(op, "denied", request_id=tag, error=str(e))
-        return web.json_response(
-            {"error": str(e), "code": "invalid_cloud_parameter"}, status=400
-        )
+        return web.json_response({"error": str(e), "code": "invalid_cloud_parameter"}, status=400)
     except CloudActionDenied as e:
         _audit(op, "denied", request_id=tag, error=str(e))
         return web.json_response({"error": str(e), "code": "cloud_action_denied"}, status=403)

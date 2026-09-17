@@ -39,6 +39,7 @@ import {
   Play,
   Cloud,
   X,
+  KeyRound,
 } from 'lucide-react'
 import {
   api,
@@ -120,6 +121,48 @@ const DEFAULT_REGION = 'us-east-1'
 /** A launch that has reached a final state — nothing more will happen to it. */
 const TERMINAL: LaunchJob['status'][] = ['done', 'failed', 'cancelled']
 const isTerminal = (j: LaunchJob) => TERMINAL.includes(j.status)
+
+/** The connect (register) step ran — the crew exists under Your instances, so a
+ *  sign-in can be re-run against it rather than provisioning anything. */
+const isRegistered = (j: LaunchJob) => j.steps.some(st => st.key === 'connect' && st.state === 'done')
+
+/** A launch that created a crew but whose Kiro sign-in never confirmed. Such a
+ *  crew is registered (Stop / Delete work) but a chat on it fails with "not
+ *  logged in", so it must not read as ready to connect. */
+const needsSignin = (j: LaunchJob) =>
+  isTerminal(j) && !!j.instance_id && j.signin_detected !== true && isRegistered(j)
+
+/** Whether the Connect step's icon should read as waiting rather than done.
+ *  What it answers is "is this crew signed in", NOT "is this job over" — a
+ *  registered crew waiting on a code is unsigned for the whole approval, which
+ *  is most of the time a user spends looking at the card. */
+const connectWaiting = (j: LaunchJob) => isRegistered(j) && j.signin_detected !== true
+
+/** The launch chose a company (IAM Identity Center) identity, so its code is
+ *  approved through the organization's portal and not the Builder ID one.
+ *  A job from an older gateway carries no `login_target` at all, which means
+ *  Builder ID — it must not be told it has a company account it never had. */
+const isSsoLaunch = (j: LaunchJob) => !!j.login_target?.start_url
+
+/** What Cancel actually destroys, which is not one thing.
+ *
+ *  On a registered crew the click only stops the Kiro sign-in — the instance and
+ *  the crew row survive, and the job goes back to done. On a launch that has not
+ *  registered yet it removes the instance being created. One word for both left
+ *  the reader unable to tell which, so the label names the blast radius. The
+ *  accessible name carries it too: an aria-label that still said "Cancel setup"
+ *  would take the distinction back away from the readers who need it most. */
+function cancelCopy(job: LaunchJob) {
+  return isRegistered(job)
+    ? {
+      label: i18nT('pages.settings.remoteCrewPanel.cancel_sign_in'),
+      aria: i18nT('pages.settings.remoteCrewPanel.cancel_sign_in_of', { tag: job.tag }),
+    }
+    : {
+      label: i18nT('pages.settings.remoteCrewPanel.cancel_remove_instance'),
+      aria: i18nT('pages.settings.remoteCrewPanel.cancel_setup_remove_of', { tag: job.tag }),
+    }
+}
 
 /** The AWS coordinates a lifecycle call needs, taken from the crew itself.
  *
@@ -238,6 +281,220 @@ function ProvisionerCard({ provisioner, on, onPick }: {
   )
 }
 
+/** The device code the user must approve, with its actions. Shared by the setup
+ *  card and the crew row so the code is reachable from BOTH tabs — a user who
+ *  left the setup tab must not have to find their way back to finish. */
+function SigninPromptBlock({ job, onRestart, restarting, onFetch, fetching, compact, crewName }: {
+  job: LaunchJob
+  onRestart: (id: string) => void
+  restarting: boolean
+  /** Ask the gateway for the pending prompt — the only way to see a code for a
+   *  job that reached `awaiting_signin` before this tab was open. */
+  onFetch: (id: string) => void
+  fetching: boolean
+  compact?: boolean
+  /** The crew this block belongs to, when nothing directly above the block names
+   *  it. In `Your instances` the block sits among several rows, and an unnamed
+   *  "This crew" there attributes the sign-in to whichever row the reader
+   *  happened to be looking at. The setup card names the crew in its own header,
+   *  so it passes nothing and keeps the shorter title. */
+  crewName?: string
+}) {
+  // The code is a one-time value the reader must type into a browser, and the
+  // reader tried CLICKING it to copy. `copyToClipboard` is the guarded helper,
+  // not `navigator.clipboard` directly: on a plain-HTTP remote dashboard the API
+  // is undefined and a direct call throws synchronously, so the copy has to be
+  // able to report failure rather than paint success regardless.
+  const [codeCopied, setCodeCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
+  const copyCode = useCallback(async (code: string) => {
+    setCopyFailed(false)
+    let ok = false
+    try {
+      ok = await copyToClipboard(code)
+    } catch {
+      ok = false
+    }
+    if (!ok) {
+      setCopyFailed(true)
+      return
+    }
+    setCodeCopied(true)
+    window.setTimeout(() => setCodeCopied(false), 1500)
+  }, [])
+  const awaiting = job.status === 'awaiting_signin'
+  const starting = job.status === 'running' && job.steps.some(st => st.key === 'signin' && st.state === 'active')
+  const signin = job.signin ?? null
+  // A code the gateway is still polling for is live: offer only the page. A code
+  // left over from a wait that ran out MAY still work, so keep it, but the way
+  // forward when it does not is a fresh one — never a second button that
+  // silently restarts the login while the shown code is being typed in.
+  const stale = !awaiting && !!signin
+  // The restart route acts on a crew: it refuses a job that never created one.
+  // Offering the button there would answer a click with a 400.
+  const canRestart = isRegistered(job) && !!job.instance_id
+  return (
+    <div className={`${compact ? 'mt-2' : 'mt-3'} rounded-md border border-accent-subtle bg-bg-elevated px-3 py-2.5`} data-testid="signin-prompt">
+      {/* Not "Sign in to Kiro" again: that string is already the step, the badge
+          and the banner, so four copies left the reader unsure which one to act
+          on. This box's job is the code.
+
+          And it names WHICH sign-in. "Sign-in" means two things in this flow —
+          the Kiro sign-in that is the step, and the company SSO sign-in that
+          carries it out — and nothing on screen said the second was how the
+          first happens; the reader had to assume it. */}
+      <div className="text-[13px] font-medium text-text-strong">
+        {crewName
+          ? isSsoLaunch(job)
+            ? i18nT('pages.settings.remoteCrewPanel.approve_your_code_sso_for', { name: crewName })
+            : i18nT('pages.settings.remoteCrewPanel.approve_your_code_for', { name: crewName })
+          : isSsoLaunch(job)
+            ? i18nT('pages.settings.remoteCrewPanel.approve_your_code_sso')
+            : i18nT('pages.settings.remoteCrewPanel.approve_your_code')}
+      </div>
+      <div className="text-[12px] text-muted mt-0.5">
+        {starting
+          ? i18nT('pages.settings.remoteCrewPanel.sign_in_starting')
+          : stale
+            ? i18nT('pages.settings.remoteCrewPanel.sign_in_unconfirmed')
+            : awaiting
+              // Names the two sign-ins as ONE act. The reader could not tell
+              // whether the Kiro sign-in step and the company SSO approval were
+              // one login or two, and had to assume the second carried out the
+              // first.
+              ? isSsoLaunch(job)
+                ? i18nT('pages.settings.remoteCrewPanel.sign_in_hint_sso')
+                : i18nT('pages.settings.remoteCrewPanel.sign_in_hint')
+              : i18nT('pages.settings.remoteCrewPanel.sign_in_needed')}
+      </div>
+      {starting ? (
+        <div className="mt-2 text-[12px] text-muted inline-flex items-center gap-1.5">
+          <Loader2 size={13} className="text-accent animate-spin" /> {i18nT('pages.settings.remoteCrewPanel.sign_in_preparing_code')}
+        </div>
+      ) : (
+        <div className="mt-2 flex items-center gap-3 flex-wrap">
+          {signin && (
+            <>
+              <button
+                type="button"
+                onClick={() => copyCode(signin.code)}
+                aria-label={i18nT('pages.settings.remoteCrewPanel.copy_code_aria', { code: signin.code })}
+                title={i18nT('pages.settings.remoteCrewPanel.copy_code_aria', { code: signin.code })}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg px-2.5 py-1 font-mono text-[13px] text-accent hover:border-accent-subtle focus-ring"
+                data-testid="signin-code-copy"
+              >
+                {i18nT('pages.settings.remoteCrewPanel.your_code', { code: signin.code })}
+                {codeCopied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+              </button>
+              {/* Visible, not sr-only: the icon swap alone is easy to miss, and a
+                  copy that FAILED must say so — the reader would otherwise paste
+                  nothing into the browser and blame the code. */}
+              {codeCopied && (
+                <span role="status" className="text-[12px] text-ok">
+                  {i18nT('pages.settings.remoteCrewPanel.copied')}
+                </span>
+              )}
+              {copyFailed && (
+                // The panel's own surface, the one `PrereqRow` uses for its copy
+                // failures -- not a bare span. A failure styled unlike every
+                // neighbouring error is the one the reader skips, and `askAgent`
+                // is what makes it actionable.
+                <ErrorNotice
+                  variant="inline"
+                  className="mt-0"
+                  message={i18nT('pages.settings.remoteCrewPanel.copy_failed')}
+                  askAgent
+                  testId="signin-copy-error"
+                />
+              )}
+              <a className="inline-flex items-center gap-1.5 text-accent text-[13px] font-medium hover:underline" href={signin.url} target="_blank" rel="noreferrer">
+                <ExternalLink size={13} /> {i18nT('pages.settings.remoteCrewPanel.open_sign_in')}
+              </a>
+            </>
+          )}
+          {(stale || (awaiting && !signin)) && (
+            // Two states, one call. `awaiting && !signin`: the prompt lives on the
+            // gateway and a job already awaiting sign-in when this tab opened has
+            // nothing to render until the dashboard asks. `stale`: the job is over
+            // but its code was preserved, and the gateway re-probes the box on this
+            // same call -- so a user who approved that code in their browser gets
+            // the crew marked signed in.
+            //
+            // Without this the re-probe was unreachable: it lives behind `onFetch`,
+            // which only rendered while `awaiting`. The reader's only option on a
+            // preserved code was to replace it, discarding the approval they had
+            // just given.
+            //
+            // It is NOT the external link, and must not wear its icon or its label:
+            // this click asks the gateway for the pending prompt and renders the
+            // code inline — it opens nothing. "Open sign-in page" under an
+            // external-link icon promised a browser tab, so the reader waited for a
+            // tab that never came. The real link is the anchor beside the code,
+            // which appears once this click has produced one.
+            <Btn primary onClick={() => onFetch(job.id)} disabled={fetching}>
+                            {stale
+                ? i18nT('pages.settings.remoteCrewPanel.recheck_sign_in')
+                : i18nT('pages.settings.remoteCrewPanel.fetch_sign_in_code')}
+            </Btn>
+          )}
+          {!awaiting && canRestart && !signin && (
+            // The only sign-in there is when no code exists, so it is the primary.
+            // With a code on screen this action moves OUT of the row entirely —
+            // see the hint below: the row there already holds the code chip, the
+            // code's own page link and the recheck primary, and a fourth sibling
+            // button left the reader choosing between four peers with no ranking.
+            <Btn primary onClick={() => onRestart(job.id)} disabled={restarting}>
+                            {restarting
+                ? i18nT('pages.settings.remoteCrewPanel.sign_in_starting_short')
+                : i18nT('pages.settings.remoteCrewPanel.start_sign_in')}
+            </Btn>
+          )}
+        </div>
+      )}
+      {/* What the click PRODUCES. The two recovery buttons read correctly only if
+          you already know whether they resume the code on screen or replace it,
+          and replacing is irreversible for a code being typed elsewhere. Gated on
+          the same condition as the button: a hint with no button beside it
+          describes a click the reader cannot make. */}
+      {/* Every recovery button says what the click produces -- including the
+          fetch button, which was the only one whose hint was gated off, because
+          the gate required `!awaiting`. That is what left "Start sign-in" and
+          "Show the sign-in code" looking like they might do the same thing. */}
+      {!starting && (awaiting ? !signin : canRestart) && (
+        <div className="mt-1.5 text-[12px] text-muted" data-testid="signin-recovery-hint">
+          {awaiting
+            ? i18nT('pages.settings.remoteCrewPanel.fetch_code_hint')
+            : signin
+              ? i18nT('pages.settings.remoteCrewPanel.recheck_hint')
+              : i18nT('pages.settings.remoteCrewPanel.start_sign_in_hint')}
+          {/* The replacement, as an inline text link inside the sentence that
+              already warns what it costs — not a fourth button in the row above.
+              It is still a real <button> with the same `onRestart` handler and
+              the same label, so it keeps its name, its keyboard reachability and
+              its disabled state while a restart is in flight; only its rank
+              changed, from a peer of the primary to the sentence's own link. */}
+          {!awaiting && canRestart && signin && (
+            <>
+              {' '}
+              <button
+                type="button"
+                onClick={() => onRestart(job.id)}
+                disabled={restarting}
+                className="text-[12px] text-accent hover:underline bg-transparent border-none cursor-pointer p-0 font-body disabled:opacity-30 disabled:cursor-not-allowed focus-ring"
+                data-testid="signin-get-new-code"
+              >
+                {restarting
+                  ? i18nT('pages.settings.remoteCrewPanel.sign_in_starting_short')
+                  : i18nT('pages.settings.remoteCrewPanel.get_new_code')}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** One in-progress launch, shown among the crews as a "Setting up" row. */
 function SettingUpRow({ job, onCancel, cancelling }: { job: LaunchJob; onCancel: (id: string) => void; cancelling: boolean }) {
   const total = job.steps.length || 4
@@ -270,8 +527,12 @@ function SettingUpRow({ job, onCancel, cancelling }: { job: LaunchJob; onCancel:
         </div>
       </div>
       <div className="shrink-0">
-        <Btn onClick={() => onCancel(job.id)} disabled={cancelling} aria-label={i18nT('pages.settings.remoteCrewPanel.cancel_setup_of', { tag: job.tag })}>
-          {cancelling ? i18nT('pages.settings.remoteCrewPanel.cancelling') : i18nT('pages.settings.remoteCrewPanel.cancel')}
+        {/* Names what it removes. Only unregistered launches reach this row (a
+            sign-in retry is a crew row below), so this is always the teardown
+            case — but it reads the same test as the card rather than hardcoding
+            the answer, so the copy cannot drift from the filter above it. */}
+        <Btn onClick={() => onCancel(job.id)} disabled={cancelling} aria-label={cancelCopy(job).aria}>
+          {cancelling ? i18nT('pages.settings.remoteCrewPanel.cancelling') : cancelCopy(job).label}
         </Btn>
       </div>
     </div>
@@ -305,6 +566,11 @@ function CrewRow({
   onEditRebase,
   editing,
   blocked,
+  signinJob,
+  onRestartSignin,
+  restartingSignin,
+  onFetchSignin,
+  fetchingSignin,
 }: {
   inst: InstanceView
   cloudTag: string | null
@@ -334,9 +600,25 @@ function CrewRow({
   editing: boolean
   /** This row's Edit was refused because another row holds unsaved changes. */
   blocked: boolean
+  /** The launch job for this crew when its Kiro sign-in is missing or in
+   *  progress; null when signed in (or not a cloud crew). */
+  signinJob: LaunchJob | null
+  onRestartSignin: (id: string) => void
+  restartingSignin: boolean
+  onFetchSignin: (id: string) => void
+  fetchingSignin: boolean
 }) {
   const connected = inst.status.state === 'connected'
   const isCloud = cloudTag !== null
+  // Connecting an unsigned crew opens a remote dashboard whose every chat fails
+  // with "not logged in" and whose fix ("run kiro-cli login in a terminal") is
+  // unreachable from there. Hold Connect back until the sign-in lands; the row
+  // shows the code and the way to get a fresh one instead.
+  //
+  // NOT gated on `!connected`: auto-connect is default-on, so an unsigned crew is
+  // routinely connected already — and that is precisely when the badge and the
+  // recovery controls are needed, because the chats are the thing that fails.
+  const awaitingSignin = signinJob !== null
   // Two persisted signals mark a row possibly-cloud when no launch job matches: an
   // EC2 stamp (`provisioner_id`), and an SSM target — the CLI launcher registers real
   // cloud crews the same way, and those never produce a launch job in this gateway's
@@ -381,7 +663,14 @@ function CrewRow({
             {target}
             {inst.connection_method === 'ssm' && inst.aws_region ? ` (${inst.aws_region})` : ''} {i18nT('pages.settings.instancesPanel.port_2')} {inst.remote_port}
           </div>
-          <div className="mt-1"><StatusBadge status={inst.status} /></div>
+          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+            <StatusBadge status={inst.status} />
+            {awaitingSignin && (
+              <Badge variant="warn" title={i18nT('pages.settings.remoteCrewPanel.needs_sign_in_hint')}>
+                <KeyRound className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.needs_sign_in')}
+              </Badge>
+            )}
+          </div>
           <div className="text-[11px] text-muted-strong mt-1">
             {isCloud
               ? i18nT('pages.settings.remoteCrewPanel.launched_by_kiro_crew')
@@ -404,6 +693,14 @@ function CrewRow({
         {transient ? null : connected ? (
           <Btn onClick={() => onDisconnect(inst.id)} disabled={!!busy || deleting}>
             <Unplug className="lucide-inline" /> {i18nT('pages.settings.instancesPanel.disconnect')}
+          </Btn>
+        ) : awaitingSignin ? (
+          <Btn
+            disabled
+            title={i18nT('pages.settings.remoteCrewPanel.needs_sign_in_hint')}
+            aria-label={i18nT('pages.settings.remoteCrewPanel.connect_after_sign_in')}
+          >
+            <Plug className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.connect_after_sign_in')}
           </Btn>
         ) : (
           <Btn primary onClick={() => onConnect(inst.id)} disabled={!!busy || deleting}>
@@ -535,6 +832,20 @@ function CrewRow({
         )}
       </div>
     </div>
+    {/* BELOW the row header, and naming its crew. Rendered above the name it read
+        as a page-level warning banner about the whole panel, and with several rows
+        it attributed the sign-in to whichever crew the reader was looking at. */}
+    {awaitingSignin && signinJob && (
+      <SigninPromptBlock
+        job={signinJob}
+        crewName={inst.name}
+        onRestart={onRestartSignin}
+        restarting={restartingSignin}
+        onFetch={onFetchSignin}
+        fetching={fetchingSignin}
+        compact
+      />
+    )}
     {blocked && (
       // At the row, and assertive: the menu closes on select, so a refusal that
       // renders anywhere else reads as the click having done nothing at all.
@@ -639,10 +950,15 @@ function PrereqRow({
 }
 
 /** The launch-in-progress card (setup tab): 4 steps + device-code sign-in. */
-function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
+function LaunchProgressCard({
+  job, onCancel, onRestartSignin, restartingSignin, onFetchSignin, fetchingSignin, cancelling,
+}: {
   job: LaunchJob
   onCancel: (id: string) => void
-  onSignin: (id: string) => void
+  onRestartSignin: (id: string) => void
+  restartingSignin: boolean
+  onFetchSignin: (id: string) => void
+  fetchingSignin: boolean
   cancelling: boolean
 }) {
   const terminal = isTerminal(job)
@@ -650,21 +966,44 @@ function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
   // cleared only once sign-in is confirmed, or when a restart reaps the job), so the
   // user can still finish from the dashboard. Gating the block on `awaiting_signin`
   // alone hid the code the moment the job went terminal — making that promise a dead
-  // end. A surviving prompt on a terminal job IS the unconfirmed case.
-  const unconfirmedSignin = terminal && !!job.signin
-  const signin = job.signin ?? null
+  // end. A crew that exists but never confirmed its sign-in — with or without a
+  // surviving code — is the unconfirmed case, and the block offers a fresh code.
+  const unsigned = needsSignin(job)
+  const signinInFlight = !terminal && isRegistered(job)
+  const waiting = connectWaiting(job)
+  // A surviving code stays visible on ANY terminal job, `needsSignin` or not: the
+  // gateway keeps it precisely so setup can be finished here, and a job whose
+  // steps do not name the connect step would otherwise lose it.
+  const showSignin = job.status === 'awaiting_signin' || unsigned || signinInFlight || (terminal && !!job.signin)
   return (
     <Card>
       <div className="flex items-center gap-2 mb-3">
         {job.status === 'done'
-          ? <Badge variant="ok">{i18nT('pages.settings.instancesPanel.connect')}</Badge>
+          ? unsigned
+            ? <Badge variant="warn"><KeyRound className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.needs_sign_in')}</Badge>
+            : <Badge variant="ok">{i18nT('pages.settings.instancesPanel.connect')}</Badge>
           : job.status === 'failed'
             ? <Badge variant="err">{i18nT('pages.settings.remoteCrewPanel.launch_failed_title')}</Badge>
-            : <Badge variant="aim">{i18nT('pages.settings.remoteCrewPanel.launching')}</Badge>}
+            // "Launching…" under a card whose whole body is asking the reader to
+            // approve a code says the machine is busy and there is nothing to do
+            // — so the reader waited for a launch that was in fact waiting for
+            // THEM. `awaiting_signin` is a blocked-on-you state, not progress:
+            // same warn key icon the terminal unsigned badge uses, so the two
+            // read as one condition seen at two moments.
+            : job.status === 'awaiting_signin' || signinInFlight
+              // Also the restart route: a running job whose connect step is already
+              // done is signing in, not launching -- the create step is ticked, so
+              // "Launching..." above it left the reader asking what was still launching.
+              ? <Badge variant="warn"><KeyRound className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.awaiting_sign_in')}</Badge>
+              : <Badge variant="aim">{i18nT('pages.settings.remoteCrewPanel.launching')}</Badge>}
         <span className="text-text-strong text-sm font-medium">{i18nT('pages.settings.remoteCrewPanel.cloud_crew_name', { tag: job.tag })}</span>
+        {/* A sign-in retry and a launch both show this button, and they destroy
+            very different things — the reader "would not dare click it" without
+            knowing which. Split on the same `isRegistered` test the rest of the
+            card uses. */}
         {!terminal && (
-          <Btn className="ml-auto" onClick={() => onCancel(job.id)} disabled={cancelling} aria-label={i18nT('pages.settings.remoteCrewPanel.cancel_setup_of', { tag: job.tag })}>
-            {cancelling ? i18nT('pages.settings.remoteCrewPanel.cancelling') : i18nT('pages.settings.remoteCrewPanel.cancel')}
+          <Btn className="ml-auto" onClick={() => onCancel(job.id)} disabled={cancelling} aria-label={cancelCopy(job).aria}>
+            {cancelling ? i18nT('pages.settings.remoteCrewPanel.cancelling') : cancelCopy(job).label}
           </Btn>
         )}
       </div>
@@ -672,7 +1011,20 @@ function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
         {job.steps.map(step => (
           <li key={step.key} className="flex items-start gap-2.5">
             <span className="mt-0.5 shrink-0">
-              {step.state === 'done'
+              {/* The connect step of an unsigned launch DID run — the crew is
+                  registered — but a green check beside "finish the Kiro sign-in
+                  before connecting" reads as done and not-done at the same time.
+                  Mark it as the waiting state its own detail describes.
+
+                  The sign-in step of that same crew is the SAME waiting state. An
+                  empty circle beside a step the card is actively asking you to
+                  finish reads as going backwards from "in progress"; `skipped` is
+                  what a launch that registered without confirming leaves there. */}
+              {waiting
+                && ((step.key === 'connect' && step.state === 'done')
+                  || (step.key === 'signin' && (step.state === 'skipped' || step.state === 'pending')))
+                ? <KeyRound size={15} className="text-warn" data-testid={`step-waiting-${step.key}`} />
+                : step.state === 'done'
                 ? <CheckCircle size={15} className="text-ok" />
                 : step.state === 'failed'
                   ? <AlertTriangle size={15} className="text-danger" />
@@ -693,38 +1045,27 @@ function LaunchProgressCard({ job, onCancel, onSignin, cancelling }: {
         ))}
       </ol>
 
-      {(job.status === 'awaiting_signin' || unconfirmedSignin) && (
-        <div className="mt-3 rounded-md border border-accent-subtle bg-bg-elevated px-3 py-2.5">
-          <div className="text-[13px] font-medium text-text-strong">{i18nT('pages.settings.remoteCrewPanel.sign_in_to_kiro')}</div>
-          <div className="text-[12px] text-muted mt-0.5">
-            {unconfirmedSignin
-              ? i18nT('pages.settings.remoteCrewPanel.sign_in_unconfirmed')
-              : i18nT('pages.settings.remoteCrewPanel.sign_in_hint')}
-          </div>
-          {signin ? (
-            <div className="mt-2 flex items-center gap-3 flex-wrap">
-              <code className="rounded-md border border-border bg-bg px-2.5 py-1 font-mono text-[13px] text-accent">
-                {i18nT('pages.settings.remoteCrewPanel.your_code', { code: signin.code })}
-              </code>
-              <a className="inline-flex items-center gap-1.5 text-accent text-[13px] font-medium hover:underline" href={signin.url} target="_blank" rel="noreferrer">
-                <ExternalLink size={13} /> {i18nT('pages.settings.remoteCrewPanel.open_sign_in')}
-              </a>
-            </div>
-          ) : (
-            <div className="mt-2">
-              <Btn onClick={() => onSignin(job.id)}>
-                <ExternalLink className="lucide-inline" /> {i18nT('pages.settings.remoteCrewPanel.open_sign_in')}
-              </Btn>
-            </div>
-          )}
-        </div>
+      {showSignin && (
+        <SigninPromptBlock
+          job={job}
+          onRestart={onRestartSignin}
+          restarting={restartingSignin}
+          onFetch={onFetchSignin}
+          fetching={fetchingSignin}
+        />
       )}
 
       {/* No hand-off: this card sits in the setup flow whose form fields
           (name, host, size) are still live — navigating away discards them. */}
       {job.error ? <ErrorNotice message={job.error} className="mt-3" /> : null}
       <p className="mt-3 text-[12px] text-muted">
-        {job.status === 'done' ? i18nT('pages.settings.remoteCrewPanel.launch_done') : i18nT('pages.settings.remoteCrewPanel.runs_on_gateway')}
+        {job.status === 'done'
+          ? unsigned
+            // "your new instance is ready" under a Needs sign-in badge is the
+            // exact claim this whole card exists to stop making.
+            ? i18nT('pages.settings.remoteCrewPanel.launch_done_unsigned')
+            : i18nT('pages.settings.remoteCrewPanel.launch_done')
+          : i18nT('pages.settings.remoteCrewPanel.runs_on_gateway')}
       </p>
     </Card>
   )
@@ -1114,6 +1455,21 @@ export function RemoteCrewPanel() {
     }
     return m
   }, [launches])
+  // instance_id → its launch job while the Kiro sign-in is missing or being
+  // redone. Newest job per instance wins (the list is created-at descending), so
+  // a crew re-signed by a later retry drops out once that retry confirms. The
+  // polled copy of the active job outranks the list's snapshot of it: the list
+  // is refetched on demand, the poll every few seconds, and the row must show the
+  // code the moment the gateway publishes it.
+  const signinJobByInstanceId = useMemo(() => {
+    const m = new Map<string, LaunchJob>()
+    for (const j of launches) {
+      if (!j.instance_id || m.has(j.instance_id)) continue
+      const live = launchStatusQuery.data?.id === j.id ? launchStatusQuery.data : j
+      if (needsSignin(live) || (!isTerminal(live) && isRegistered(live))) m.set(j.instance_id, live)
+    }
+    return m
+  }, [launches, launchStatusQuery.data])
 
   const reloadInstances = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ['instances'] })
@@ -1214,10 +1570,36 @@ export function RemoteCrewPanel() {
     onError: e => setActionErr(errMsg(e, i18nT('pages.settings.instancesPanel.unknown_error'))),
     onSettled: () => { reloadInstances(); reloadLaunches() },
   })
+  // Fetches the pending device-code prompt for a job that is already awaiting
+  // sign-in. Distinct from the restart below: this asks for the code that exists,
+  // that one asks for a new one. Keyed by the job the click named, not by
+  // `activeLaunchId` — the crew row offers this too, and there the job being
+  // fetched may not be the active launch at all.
   const signinMutation = useMutation({
     mutationFn: (id: string) => api.cloudLaunchSignin(id),
+    onMutate: () => setActionErr(null),
+    onError: e => {
+      // "I approved it -- check now" SUCCEEDS as HTTP 409 `signin_already_complete`:
+      // the gateway re-probed the box, found the sign-in, and there is no prompt
+      // left to return. That is the outcome the user clicked for, not an error.
+      // Painting it red told a signed-in user their sign-in had failed.
+      if (e instanceof ApiError && e.status === 409 && parseErrorCode(e.body) === 'signin_already_complete') {
+        reloadInstances()
+        reloadLaunches()
+        return
+      }
+      setActionErr(errMsg(e, i18nT('pages.settings.instancesPanel.unknown_error')))
+    },
+    onSettled: (_r, _e, id) => { void queryClient.invalidateQueries({ queryKey: ['cloud', 'launch', id] }) },
+  })
+  // Starts the Kiro sign-in again on a crew that ended up without one. The job
+  // becomes the active launch so its card and its row poll the new code live.
+  const signinRestartMutation = useMutation({
+    mutationFn: (id: string) => api.cloudLaunchSigninRestart(id),
+    onMutate: () => setActionErr(null),
+    onSuccess: job => { setActiveLaunchId(job.id); reloadLaunches() },
     onError: e => setActionErr(errMsg(e, i18nT('pages.settings.instancesPanel.unknown_error'))),
-    onSettled: () => { if (activeLaunchId) void queryClient.invalidateQueries({ queryKey: ['cloud', 'launch', activeLaunchId] }) },
+    onSettled: (_r, _e, id) => { void queryClient.invalidateQueries({ queryKey: ['cloud', 'launch', id] }) },
   })
   // Takes its body as VARIABLES rather than closing over the form state: a
   // registered provisioner's form owns its own inputs, and the core cannot read
@@ -1500,7 +1882,10 @@ export function RemoteCrewPanel() {
               </div>
             ) : (
               <div>
-                {inProgress.map(job => (
+                {/* A sign-in retry is also in progress, but its crew is already a
+                    row below (the connect step ran); a second "Setting up" row
+                    would read as a second instance being created — and billed. */}
+                {inProgress.filter(job => !isRegistered(job)).map(job => (
                   <SettingUpRow key={job.id} job={job} cancelling={cancelMutation.isPending && cancelMutation.variables === job.id} onCancel={id => cancelMutation.mutate(id)} />
                 ))}
                 {instances.map(inst => (
@@ -1508,6 +1893,11 @@ export function RemoteCrewPanel() {
                     key={inst.id}
                     inst={inst}
                     cloudTag={inst.connection_method === 'ssm' && inst.ssm_target ? cloudTagByInstanceId.get(inst.ssm_target) ?? null : null}
+                    signinJob={inst.connection_method === 'ssm' && inst.ssm_target ? signinJobByInstanceId.get(inst.ssm_target) ?? null : null}
+                    onRestartSignin={id => signinRestartMutation.mutate(id)}
+                    restartingSignin={signinRestartMutation.isPending}
+                    onFetchSignin={id => signinMutation.mutate(id)}
+                    fetchingSignin={signinMutation.isPending}
                     busy={busy}
                     deleting={inst.ssm_target ? deletingTags.has(cloudTagByInstanceId.get(inst.ssm_target) ?? '') : false}
                     confirmDelete={confirmDeleteTag !== null && confirmDeleteTag === (inst.ssm_target ? cloudTagByInstanceId.get(inst.ssm_target) : null)}
@@ -1970,7 +2360,10 @@ export function RemoteCrewPanel() {
               job={activeJob}
               cancelling={cancelMutation.isPending && cancelMutation.variables === activeJob.id}
               onCancel={id => cancelMutation.mutate(id)}
-              onSignin={id => signinMutation.mutate(id)}
+              onRestartSignin={id => signinRestartMutation.mutate(id)}
+              restartingSignin={signinRestartMutation.isPending}
+              onFetchSignin={id => signinMutation.mutate(id)}
+              fetchingSignin={signinMutation.isPending}
             />
           )}
         </div>
