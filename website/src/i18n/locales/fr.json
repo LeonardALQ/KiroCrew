@@ -15093,6 +15093,7 @@
       "show_controls": "Afficher les commandes"
     },
     "membersPage": {
+      "drawer_delegated_working": "Tâches déléguées en cours",
       "agent_template": "Modèle d'agent",
       "configuration": "Configuration",
       "crew_summary": "Résumé du membre",
