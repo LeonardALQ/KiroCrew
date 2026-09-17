@@ -315,7 +315,7 @@ import SubagentProgressBar from './chat/SubagentProgressBar'
 import TaskProgressBar from './chat/TaskProgressBar'
 import SidePanel, { CHAT_PANE_MIN_W, sidePanelFillWidth } from './chat/SidePanel'
 import { useSidePanelDock } from '../hooks/useSidePanelDock'
-import { createTurnGrouper, applyRunningState, REASONING_ROLES } from './chat/groupDisplayItems'
+import { createTurnGrouper, applyRunningState, isTurnEnd, REASONING_ROLES, TURN_OPENER_ROLES } from './chat/groupDisplayItems'
 import { setSessionPreviewPending, normalizeUrl, PREVIEW_EXPAND_EVENT } from '../components/WebPreviewPanel'
 import { detectPreviewUrl, previewFeedDecision } from '../utils/detectPreviewUrl'
 import ChatSidebar from './ChatSidebar'
@@ -4338,7 +4338,58 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // turn minimap, the Navigation tab) sees the same snapshot by construction.
   const liveTranscript = useMemo(() => ({ messages, displayItems }), [messages, displayItems])
   const renderedTranscript = useSlotDeferredValue(activeSlot, liveTranscript)
-  const renderedDisplayItems = renderedTranscript.displayItems
+  // MCP App payloads live outside the message list, so promote after the
+  // transcript defer: the FIRST render that can draw an iframe must already use
+  // the same TurnBlock subtree that later grouping will keep. Short turns are
+  // emitted as loose siblings, so promote the WHOLE loose turn region rather
+  // than each app row separately; otherwise a later merge reparents every app
+  // after the first and reloads its iframe. The boundaries mirror the grouper:
+  // opener rows start a turn, persisted assistant-final rows end one, and an
+  // already-grouped turn is its own region. The app-anchor latch below gives
+  // the synthetic turn the same key as its first rendered app row.
+  const renderedDisplayItems = useMemo<DisplayItem[]>(() => {
+    const items = renderedTranscript.displayItems
+    if (appToolCallIds.size === 0) return items
+
+    const next: DisplayItem[] = []
+    let looseItems: TurnItem[] = []
+    let looseHasApp = false
+    let promoted = false
+
+    const flushLooseTurn = () => {
+      if (looseItems.length === 0) return
+      if (looseHasApp) {
+        next.push({ kind: 'turn', items: looseItems, complete: !runningLatched })
+        promoted = true
+      } else {
+        next.push(...looseItems)
+      }
+      looseItems = []
+      looseHasApp = false
+    }
+
+    for (const item of items) {
+      if (item.kind === 'turn') {
+        flushLooseTurn()
+        next.push(item)
+        continue
+      }
+      if (item.kind === 'single' && TURN_OPENER_ROLES.has(item.msg.role)) {
+        flushLooseTurn()
+        next.push(item)
+        continue
+      }
+
+      looseItems.push(item)
+      if (item.kind === 'single' && item.msg.role === 'tool') {
+        const toolCallId = item.msg.meta?.tool_call_id
+        if (typeof toolCallId === 'string' && appToolCallIds.has(toolCallId)) looseHasApp = true
+      }
+      if (item.kind === 'single' && isTurnEnd(item.msg)) flushLooseTurn()
+    }
+    flushLooseTurn()
+    return promoted ? next : items
+  }, [renderedTranscript.displayItems, appToolCallIds, runningLatched])
 
   // Keep the ref in sync so handleRangeChanged / updatePinnedPrompt
   // read the latest displayItems. useLayoutEffect (not useEffect): the DOM's
@@ -4432,10 +4483,63 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     }
     return undefined
   }, [renderedDisplayItems])
-  const rowKeys = useMemo(
-    () => uniqueRowKeys(renderedDisplayItems, stableMsgKey),
-    [renderedDisplayItems, stableMsgKey],
-  )
+  // An inline MCP App makes one row stateful: remounting its iframe discards
+  // in-canvas work. A running turn normally keys on its lead, but a later
+  // reasoning burst can become that lead. Once an app payload exists, anchor
+  // the turn to the first app payload observed in that turn. `appToolCallIds`
+  // preserves the insertion order of chat.mcpApps, so an earlier transcript
+  // row whose slower payload arrives later cannot steal the anchor and remount
+  // an app already on screen. The session-scoped tool-call id selected here
+  // becomes the turn's latch id: its transcript row outlives the bounded render
+  // payload, so retention eviction cannot promote a later app and re-key the
+  // turn. Rebuilding the map from the rendered turns drops a latch as soon as
+  // its turn disappears. `turnLeadKey` gives the selected tool the same key it
+  // had as a loose row, while `uniqueRowKeys` preserves list-level collision
+  // handling.
+  const appAnchorByTurnId = useRef(new Map<string, string>())
+  const rowKeys = useMemo(() => {
+    // Preserve the ordinary transcript's original O(display rows) path. The
+    // deeper turn-item scan is needed only while selecting or retaining an app
+    // anchor.
+    if (appAnchorByTurnId.current.size === 0 && appToolCallIds.size === 0) {
+      return uniqueRowKeys(renderedDisplayItems, stableMsgKey)
+    }
+    const previousAnchors = appAnchorByTurnId.current
+    const retainedAnchors = new Map<string, string>()
+    const keys = uniqueRowKeys(renderedDisplayItems, stableMsgKey, (it) => {
+      if (it.kind !== 'turn' || !activeSlot) return undefined
+
+      // Retention can remove the payload that selected this anchor. Find the
+      // turn's latch from its still-rendered tool row before consulting the
+      // bounded live-payload set.
+      for (const row of it.items) {
+        if (row.kind !== 'single') continue
+        const toolCallId = row.msg.meta?.tool_call_id
+        if (typeof toolCallId !== 'string' || !toolCallId) continue
+        const turnId = mcpAppKey(activeSlot, toolCallId)
+        const anchor = previousAnchors.get(turnId)
+        if (anchor) {
+          retainedAnchors.set(turnId, anchor)
+          return anchor
+        }
+      }
+
+      for (const appToolCallId of appToolCallIds) {
+        for (const row of it.items) {
+          if (row.kind !== 'single') continue
+          if (row.msg.meta?.tool_call_id === appToolCallId) {
+            const turnId = mcpAppKey(activeSlot, appToolCallId)
+            const anchor = turnLeadKey(row, stableMsgKey)
+            retainedAnchors.set(turnId, anchor)
+            return anchor
+          }
+        }
+      }
+      return undefined
+    })
+    appAnchorByTurnId.current = retainedAnchors
+    return keys
+  }, [renderedDisplayItems, stableMsgKey, appToolCallIds, activeSlot])
   // Index lookup into the deduped list, so this getKey prices an item
   // correctly ONLY against the displayItems of its own render. Live consumers
   // pair getKeyRef with itemsRef from the same tick; the one stale-ITEMS
@@ -4612,7 +4716,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // virtualizer track that one row's growth every RO tick instead of
     // debouncing it into a stale-then-jump spacer (see the `streamingIndex`
     // option's doc and useVirtualChat.spacerLurch.test.tsx).
-    streamingIndex: isStreaming && displayItems.length > 0 ? displayItems.length - 1 : undefined,
+    streamingIndex: isStreaming && renderedDisplayItems.length > 0 ? renderedDisplayItems.length - 1 : undefined,
     // `slotRunning`, not `isStreaming`: a turn spends much of its life in tool
     // calls with no streaming row named, and follow has to keep working there.
     runActive: !!slotRunning,
@@ -5029,8 +5133,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   })
 
 
-  // Search: map message index → displayItems index for scroll-to-match
-  const messageToDisplayIdx = useMemo(() => buildMessageToDisplayIdx(displayItems), [displayItems])
+  // Search, pins, tool focus, and deep links navigate the rows the virtualizer
+  // actually renders, including post-defer MCP App coalescing.
+  const messageToDisplayIdx = useMemo(
+    () => buildMessageToDisplayIdx(renderedDisplayItems),
+    [renderedDisplayItems],
+  )
 
   const navigateToTurn = useCallback((displayIndex: number) => {
     navToDisplayIndex(displayIndex, { behavior: 'smooth', align: 'start', offset: -24 })
@@ -5038,17 +5146,13 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
 
   // The transcript renders the deferred `renderedTranscript` snapshot; while a
   // history page lands, live indexes lead the rows on screen. The minimap's
-  // items and index map come from that same frame, so a marker's display index
-  // always names the row the virtualizer is actually showing.
-  const renderedMessageToDisplayIdx = useMemo(
-    () => buildMessageToDisplayIdx(renderedTranscript.displayItems),
-    [renderedTranscript.displayItems],
-  )
+  // messages and `messageToDisplayIdx` map come from that same rendered frame,
+  // so a marker's display index always names the virtualizer row on screen.
   // One per-turn derivation: `sections` feeds the turn minimap; `links` feeds the
   // Navigation tab. Both read the deferred snapshot, so the link list trails a
   // landing history page by one deferred commit -- deliberate, and harmless for
   // a side panel.
-  const chatNav = useChatNavigation(renderedTranscript.messages, renderedMessageToDisplayIdx)
+  const chatNav = useChatNavigation(renderedTranscript.messages, messageToDisplayIdx)
 
   // ── Chat Pins ──────────────────────────────────────────────────────────────
   const {
@@ -7060,7 +7164,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   count={item.msgs.filter(m => m.role !== 'permission').length}
                   disclosureKey={`ctg-${vi.key}`}
                   hasPermission={false}
-                  isRunning={slotRunning && displayIdx === displayItems.length - 1}
+                  isRunning={slotRunning && displayIdx === renderedDisplayItems.length - 1}
                   permissionMeta={unresolvedGroupPerms.at(-1)?.meta as Record<string, unknown> | undefined}
                   pendingPermCount={unresolvedGroupPerms.length}
                   onApprove={(() => {
