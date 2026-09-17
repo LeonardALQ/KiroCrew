@@ -2310,6 +2310,24 @@ def _do_route_crew(task: str) -> str:
     )
 
 
+def _select_crew_is_private_member(session_key: str) -> bool:
+    """True when *session_key* is bound to a private V2 member.
+
+    Reads the gateway-published session binding, the leaf a member's sandbox
+    view keeps readable — so it answers without touching the hidden transcript.
+    Used only to decide the fail-closed direction of select_crew's routing-mode
+    degrade: a bound member whose mode cannot be read must not be logged as
+    persistent, while an ordinary Global session's legacy header must not be
+    mistaken for a no-trace one. A read failure answers True (fail closed).
+    """
+    try:
+        from kiro_crew.member_memory_auth import read_private_session_store
+
+        return bool(read_private_session_store(session_key))
+    except (OSError, ValueError):
+        return True
+
+
 def _do_select_crew(crew: str) -> str:
     """Orchestrator crew routing (the select_crew tool body).
 
@@ -2376,8 +2394,33 @@ def _do_select_crew(crew: str) -> str:
     # and reports failure by returning False, which matters because this module
     # keeps no logger.
     _sk = _resolve_session_key()
+    # Resolve the caller's memory mode fail-closed, because this routing log
+    # outlives session pruning: recording a no-trace session's key would durably
+    # defeat its mode. But "fail closed" must not eat a legitimate LEGACY
+    # persistent session, whose valid metadata header simply predates the
+    # ``memory_mode`` field — the established rule (``_read_memory_mode``,
+    # ``store_of_session``) is that a READABLE header without the field means
+    # ``persistent``. So distinguish the two cases:
+    #   * a private member (a session binding exists) whose transcript this
+    #     process cannot positively read — the member sandbox HIDES it, and a
+    #     hidden file reads as an empty-yet-"readable" ``{}`` — degrades to
+    #     ``incognito`` so a no-trace member is never logged with a stale/blank
+    #     mode;
+    #   * every other session keeps the legacy behaviour: read the header's
+    #     ``memory_mode``, defaulting to ``persistent`` when the field is absent.
     try:
-        _mode = str(ConversationLog().get_metadata(_sk).get("memory_mode", "") or "")
+        _meta = ConversationLog().get_metadata(_sk)
+        _raw_mode = str(_meta.get("memory_mode", "") or "")
+        if _raw_mode:
+            _mode = _raw_mode
+        elif _sk and _select_crew_is_private_member(_sk):
+            # A bound private member whose mode could not be positively read
+            # (hidden transcript in the member view): fail closed.
+            _mode = "incognito"
+        else:
+            # Global / legacy session: an absent field is a legacy persistent
+            # header, not a no-trace session.
+            _mode = "persistent"
     except Exception:
         _mode = "incognito"
     record_activity(crew, _sk, _mode, via="select_crew")

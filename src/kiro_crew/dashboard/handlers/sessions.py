@@ -49,6 +49,7 @@ from kiro_crew.dashboard.handlers._shared import (
     SESSION_SEARCH_TEXT_FIELDS,
     guard_owner_surface_routes,
     internal_memory_scope,
+    read_bounded_json,
 )
 from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
 from kiro_crew.dashboard.session_memory import SessionMemorySampler
@@ -3449,13 +3450,113 @@ async def api_session_archive_read(request: web.Request) -> web.Response:
     return web.Response(text=redacted, content_type="application/x-ndjson")
 
 
+#: The three history ops a private member relays here, mapped to the mcp_tools
+#: core that renders each. The core functions are scope-agnostic: the same code
+#: the in-process Global V1 / owner path runs, called here with the member's
+#: store as the visibility scope so the two cannot drift.
+_MEMBER_HISTORY_OPS = frozenset({"search_chat_history", "get_chat_session", "list_sessions"})
+
+
+async def api_sessions_member_history(request: web.Request) -> web.Response:
+    """POST /api/sessions/member-history — run a history tool for a private member.
+
+    The member's own MCP process runs inside the "Private member view" sandbox,
+    which hides ``sessions/`` (every transcript). Its in-process history tools
+    therefore see nothing and fail closed — the misleading "private memory is
+    unavailable". This route is the history equivalent of ``/api/memory/recall``:
+    the GATEWAY process can see the transcripts, so the member relays here, this
+    authenticates the caller's member proof, resolves its bound store, and runs
+    the SAME mcp_tools core the direct path runs — but with the member's store
+    as the visibility scope, so a member sees only transcripts bound to its own
+    store (the ``_history_memory_visible`` rule), and never Global V1 or another
+    member's history.
+
+    MCP-only (``_STRICT_INTERNAL_API_PATHS``); a browser never calls it, and
+    :func:`internal_memory_scope` refuses any caller whose member session cannot
+    be verified. Member-scoped in ``guard_owner_surface_routes`` so the owner
+    guard that fronts every other ``api_session*`` handler does not refuse it.
+    """
+    from kiro_crew.mcp_tools import sessions as _session_tools
+    from kiro_crew.member_memory_auth import private_memory_boundaries_active
+
+    # A pure Global V1 install has no private members, so nothing should relay
+    # here; refuse rather than serve an unscoped in-process read to a caller
+    # that reached this route by other means.
+    if not await asyncio.to_thread(private_memory_boundaries_active):
+        return web.json_response(
+            {"error": "private member memory is not enabled", "code": "member_memory_required"},
+            status=403,
+        )
+
+    store, refusal = await internal_memory_scope(
+        request,
+        "sessions.member_history",
+        claimed_session=request.headers.get("X-Session-Key", ""),
+    )
+    if refusal is not None:
+        return refusal
+    if not store:
+        # No verified member store: this is not a private member. The direct
+        # in-process tools serve Global V1 / owner callers; nothing legitimate
+        # reaches this relay without a member store.
+        return web.json_response(
+            {
+                "error": "this session has no private member memory; use the direct history tools",
+                "code": "member_memory_required",
+            },
+            status=403,
+        )
+
+    body, err = await read_bounded_json(request)
+    if err is not None:
+        return err
+    assert body is not None
+    op = body.get("op")
+    args = body.get("args")
+    if op not in _MEMBER_HISTORY_OPS or not isinstance(args, dict):
+        return web.json_response(
+            {"error": "unknown history op", "code": "invalid_history_op"}, status=400
+        )
+
+    session_key = request.headers.get("X-Session-Key", "").strip()
+
+    def _run() -> str:
+        # Build the visibility index gateway-side (the transcripts and bindings
+        # are visible here) and run the scope-agnostic core with the member's
+        # store as the scope. ``_history_memory_visible`` re-reads each candidate
+        # against its current store, so a member only ever sees its own rows.
+        from kiro_crew.member_memory_auth import private_history_session_index
+
+        index = private_history_session_index()
+        if op == "search_chat_history":
+            return _session_tools._search_chat_history_core(args, store, index, session_key)
+        if op == "get_chat_session":
+            return _session_tools._get_chat_session_core(args, store, index, session_key)
+        return _session_tools._list_sessions_core(args, store, index, session_key)
+
+    try:
+        output = await asyncio.to_thread(_run)
+    except (OSError, ValueError):
+        logger.warning("member-history relay failed for op=%s", op, exc_info=True)
+        return web.json_response(
+            {"error": "chat history is temporarily unavailable", "code": "store_unavailable"},
+            status=503,
+        )
+    return web.json_response({"output": output})
+
+
 # Every ``api_session*`` handler is an owner surface, so a private member's
 # internal call is refused before it runs (audit label = handler name). These
-# three verify and scope their own caller instead.
+# verify and scope their own caller instead.
 guard_owner_surface_routes(
     globals(),
     prefix="api_session",
     member_scoped=frozenset(
-        {"api_session_directive", "api_session_keepalive", "api_session_tool_policy"}
+        {
+            "api_session_directive",
+            "api_session_keepalive",
+            "api_session_tool_policy",
+            "api_sessions_member_history",
+        }
     ),
 )

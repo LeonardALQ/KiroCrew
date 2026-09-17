@@ -456,6 +456,12 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         "/api/slack/reactions",
         "/api/slack-profile",  # MCP-only (slack_profile tool); no browser caller
         "/api/sessions/summarize",  # MCP-only (list_sessions summarize leg); internal-secret, no browser caller
+        # MCP-only (private member's search/get/list history relay). A private
+        # member's sandbox view hides the transcript dir, so its history tools
+        # POST here; the gateway resolves the member store and runs the read.
+        # STRICT, not mixed: no browser calls it, and its handler verifies the
+        # caller's member proof (internal_memory_scope) before serving anything.
+        "/api/sessions/member-history",
         # MCP-only (session_ledger_read / session_ledger_record tools); no
         # browser caller. Prefix matching covers "/api/session-ledger/record".
         # Without this entry the tools' internal-secret calls fall through to

@@ -102,7 +102,10 @@ def kiro_cli_logs(name: str, args: dict[str, Any]) -> str:
             tail = None
     since = str(args.get("since", "") or "").strip() or None
 
-    from kiro_crew.member_memory_auth import mcp_memory_scope, private_memory_boundaries_active
+    from kiro_crew.member_memory_auth import (
+        private_memory_boundaries_active,
+        read_private_session_store,
+    )
 
     # These protocol logs are shared host files, not this member's diagnostic
     # directory. Redaction cannot establish which session owns ordinary prose.
@@ -113,7 +116,13 @@ def kiro_cli_logs(name: str, args: dict[str, Any]) -> str:
             session_key, refusal = mcp_core.require_strict_session_key(
                 "Error: shared kiro-cli logs require a verified Global V1 session."
             )
-            if session_key and mcp_memory_scope(session_key):
+            # Detect a private member from its own gateway-published binding,
+            # NOT via mcp_memory_scope: that reads the transcript this member's
+            # sandbox view hides, so it raised and produced the wrong "protected
+            # memory identity is unavailable" refusal AND the wrong audit
+            # outcome. The binding leaf is readable in the member view, so this
+            # resolves cleanly to the intended "unavailable to private members".
+            if session_key and read_private_session_store(session_key):
                 refusal = "Error: shared kiro-cli logs are unavailable to private members."
         else:
             # Pure V1 installations retain the original caller contract.
