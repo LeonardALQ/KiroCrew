@@ -574,7 +574,7 @@ describe('AutoNudgePopover Trigger nudge (#8212)', () => {
     return { onChange, onOpenChange }
   }
 
-  const triggerButton = () => screen.queryByRole('button', { name: 'Trigger nudge' })
+  const triggerButton = () => screen.queryByRole('button', { name: 'Save edits and nudge now' })
 
   it('offers the button while a loop is active', () => {
     renderWith(makeLoop())
@@ -590,9 +590,10 @@ describe('AutoNudgePopover Trigger nudge (#8212)', () => {
     expect(screen.queryAllByRole('button', { name: /Trigger/i })).toHaveLength(0)
   })
 
-  it('offers it NOWHERE for a paused loop, because the server refuses to fire one', () => {
+  it('offers it NOWHERE for a stopped loop, because the server refuses to fire one', () => {
     // Gated on `active`, not on `loop`: every terminal bound leaves the loop
-    // inactive, so a button here could only ever produce a 409.
+    // inactive, so a button here could only ever produce a 409. (A loop the
+    // user PAUSED keeps the control, disabled -- see the icon-controls block.)
     renderWith(makeLoop({ active: false }))
     expect(triggerButton()).toBeNull()
     expect(screen.queryAllByRole('button', { name: /Trigger/i })).toHaveLength(0)
@@ -611,19 +612,23 @@ describe('AutoNudgePopover Trigger nudge (#8212)', () => {
     expect((triggerButton() as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('names the way OUT of a paused loop instead of leaving Save to do it silently', () => {
-    // The primary button PATCHes `active: true`, so on a paused loop it is the
-    // resume control -- and it used to read "Save", which said nothing. A blind
-    // reader found no resume path at all and called "Stop loop" risky as a
-    // result. Both directions asserted: an active loop must still read Save, or
-    // this would just move the confusion.
+  it('names the way OUT of a stopped loop: one accented Play, and no Save to do it silently', () => {
+    // A stopped loop's way back is its own control -- Play, labelled "Start
+    // loop and nudge now" -- which saves the form, revives the loop and fires.
+    // There is no separate Save on an inactive loop: the one control does it
+    // all, in the accent the primary action wears. It used to be one button
+    // reading "Save", which said nothing about resuming; a blind reader found
+    // no resume path at all and called "Stop loop" risky as a result. Both
+    // directions asserted: a running loop has Save and no Play, or this would
+    // just move the confusion.
     renderWith(makeLoop({ active: false }))
-    expect(screen.getByRole('button', { name: 'Start loop' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Start loop and nudge now' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Start loop and nudge now' }).className).toContain('bg-accent')
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
     cleanup()
     renderWith(makeLoop({ active: true }))
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Start loop' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Start loop and nudge now' })).toBeNull()
   })
 
   it('says the loop is stopped where the button would be, so the absence has a reason', () => {
@@ -640,75 +645,90 @@ describe('AutoNudgePopover Trigger nudge (#8212)', () => {
     expect(triggerButton()).toBeTruthy()
   })
 
-  it('posts to the loop-scoped fire route with NO body, so the ARMED message is what fires', async () => {
-    const fired = makeLoop({ next_due_ts: 1_700_000_000 })
-    vi.stubGlobal('fetch', vi.fn((url: string) =>
+  it('saves the form first, then posts to the loop-scoped fire route with NO body -- so the form as it reads is what fires', async () => {
+    const saved = makeLoop({ message: 'edited then triggered' })
+    const fired = makeLoop({ message: 'edited then triggered', next_due_ts: 1_700_000_000 })
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve(String(url).endsWith('/fire') ? { ok: true, loop: fired } : { loop: null }),
+        json: () => Promise.resolve(
+          String(url).endsWith('/fire') ? { ok: true, loop: fired }
+            : init?.method === 'PATCH' ? { ok: true, loop: saved }
+              : { loop: null },
+        ),
       }),
     ) as unknown as typeof fetch)
     const { onChange, onOpenChange } = renderWith(makeLoop())
+    fireEvent.change(screen.getByLabelText('Goal description'), { target: { value: 'edited then triggered' } })
 
     await act(async () => { fireEvent.click(triggerButton()!) })
 
     // Selected by URL, not by index: opening the popover also reads /api/crons.
     const calls = (fetch as unknown as { mock: { calls: [string, { method?: string, body?: string }?][] } }).mock.calls
+    const patch = calls.find(c => String(c[0]) === '/api/autonudge/l1' && c[1]?.method === 'PATCH')
     const fire = calls.find(c => String(c[0]) === '/api/autonudge/l1/fire')
+    expect(patch, 'no PATCH of the form was issued').toBeTruthy()
     expect(fire, 'no POST to the fire route was issued').toBeTruthy()
+    // Every trigger implicitly saves: the three fields, and NEVER `active` --
+    // a running loop's save must not be able to revive a loop another tab
+    // paused between render and press.
+    expect(JSON.parse(patch![1]!.body!)).toEqual({ message: 'edited then triggered', idle_secs: 90, max_cycles: 3 })
+    // The fire itself carries no body: what fires is what the loop now holds,
+    // which the PATCH a moment earlier made the form's text.
     expect(fire![1]?.method).toBe('POST')
-    // Load-bearing: a body would let a stale popover field become the prompt.
-    // The nudge fired must be whatever the loop currently holds, read server-side.
     expect(fire![1]?.body).toBeUndefined()
-    // The server no longer moves the deadline, so the component supplies the
-    // armed one. Asserted field-wise rather than by identity: the loop's own
-    // data must be passed through untouched, and only `next_due_ts` replaced.
+    expect(calls.indexOf(patch!)).toBeLessThan(calls.indexOf(fire!))
+    // The saved record is handed up, then the due reading: the server no
+    // longer moves the deadline, so the component supplies the armed one.
+    expect(onChange).toHaveBeenNthCalledWith(1, saved)
     const passed = onChange.mock.calls.at(-1)?.[0]
     expect(passed).toMatchObject({ ...fired, next_due_ts: expect.any(Number) })
     expect(passed.next_due_ts).toBeGreaterThan(Date.now() / 1000 - 5)
-    // And it must NOT close: closing would drop an unsaved edit in the textarea
-    // 40px above, with no dirty guard, so a press after an edit would cost the
-    // user their text on top of spending a turn on the old prompt.
+    // Stays open, like every control that fires or changes the run state: the
+    // outcome (the schedule line reading due) is visible in place, and a
+    // refusal needs somewhere to land. Only Save closes.
     expect(onOpenChange).not.toHaveBeenCalled()
   })
 
-  it('keeps a typed-but-unsaved goal edit after a successful press', async () => {
-    // The complement of the assertion above, stated as the user-visible fact
-    // rather than as a callback that was not invoked: a press must never be a
-    // silent way to lose work.
-    vi.stubGlobal('fetch', vi.fn((url: string) =>
+  it('keeps the typed goal in the textarea after a successful press (it is now saved, not lost)', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve(String(url).endsWith('/fire') ? { ok: true, loop: makeLoop() } : { loop: null }),
+        json: () => Promise.resolve(
+          String(url).endsWith('/fire') || init?.method === 'PATCH' ? { ok: true, loop: makeLoop({ message: 'edited and saved' }) } : { loop: null },
+        ),
       }),
     ) as unknown as typeof fetch)
     renderWith(makeLoop())
     const box = screen.getByLabelText('Goal description') as HTMLTextAreaElement
-    fireEvent.change(box, { target: { value: 'edited but not saved' } })
+    fireEvent.change(box, { target: { value: 'edited and saved' } })
 
     await act(async () => { fireEvent.click(triggerButton()!) })
 
     expect((screen.getByLabelText('Goal description') as HTMLTextAreaElement).value)
-      .toBe('edited but not saved')
+      .toBe('edited and saved')
   })
 
-  it('surfaces a refusal inline and keeps the popover open, because it holds unsaved fields', async () => {
+  it('surfaces a refused fire inline and keeps the popover open; the save that preceded it stands', async () => {
     // The refusal names the outcome and the next step, not just the condition:
     // a reader must be able to tell a refusal from a delay, and the press was
     // refused rather than queued.
     const REFUSAL = 'nudge not sent: the agent is still working, so try again when it finishes'
-    vi.stubGlobal('fetch', vi.fn((url: string) =>
+    const saved = makeLoop()
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) =>
       String(url).endsWith('/fire')
         ? Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ error: REFUSAL, code: 'session_busy' }) })
-        : Promise.resolve({ ok: true, json: () => Promise.resolve({ loop: null }) }),
+        : Promise.resolve({ ok: true, json: () => Promise.resolve(init?.method === 'PATCH' ? { ok: true, loop: saved } : { loop: null }) }),
     ) as unknown as typeof fetch)
     const { onChange, onOpenChange } = renderWith(makeLoop())
 
     await act(async () => { fireEvent.click(triggerButton()!) })
 
     expect(screen.getByText(REFUSAL)).toBeTruthy()
+    // The save landed and is handed up once; the fire's refusal does not undo it.
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(saved)
     // A refusal must not report success by tearing the popover down.
-    expect(onChange).not.toHaveBeenCalled()
     expect(onOpenChange).not.toHaveBeenCalled()
   })
 
@@ -732,7 +752,7 @@ describe('AutoNudgePopover Trigger nudge (#8212)', () => {
     expect(screen.queryByRole('button', { name: 'Stop loop' })).toBeNull()
     expect(screen.getByTestId('auto-nudge-loop-paused').textContent).toBe('Stopped')
     expect(screen.getByTestId('auto-nudge-stopped-help').textContent)
-      .toBe('Start loop resumes this goal. Clear stopped goal removes it for good.')
+      .toBe('Play saves your edits, restarts this goal and sends a nudge now. Clear stopped goal removes it for good.')
     cleanup()
     renderWith(makeLoop({ active: true }))
     expect(screen.getByRole('button', { name: 'Stop loop' })).toBeTruthy()
@@ -843,21 +863,459 @@ describe('AutoNudgePopover Trigger nudge (#8212)', () => {
     ])
   })
 
-  it('sits on the schedule line, not in the Stop/Save action row (max-two-buttons-per-row)', async () => {
-    // `website/AUTOSDE.yaml:230` holds a row to two controls and names this
-    // escape itself: the third action "leaves the row". Asserted structurally
-    // rather than by counting the whole popover, because the rule is about
-    // SIBLINGS IN ONE horizontal group.
+  it('sits in the action row, in the right cluster beside Pause and Save, with Stop alone on the left (operator ruling 2026-09-17)', async () => {
+    // ONE lane for every control. This knowingly exceeds
+    // `website/AUTOSDE.yaml:230` (`max-two-buttons-per-row`): the product owner
+    // ruled the layout -- Stop isolated left as the destructive control, the
+    // loop's transport and save controls clustered right, an overflow menu
+    // rejected because every control must stay visible. Asserted structurally
+    // and by ORDER, read by aria-label: the controls are icon buttons, so their
+    // text content is empty by design.
     renderWith(makeLoop())
-    const save = screen.getByRole('button', { name: 'Save' })
-    const row = save.parentElement!
-    const rowButtons = Array.from(row.querySelectorAll('button'))
-    expect(rowButtons).toHaveLength(2)
-    expect(rowButtons.map(b => b.textContent)).toEqual(['Stop loop', 'Save'])
-    // And the trigger is a sibling of the schedule text instead.
-    const trigger = triggerButton()!
-    expect(trigger.parentElement).not.toBe(row)
-    expect(trigger.parentElement!.textContent).toMatch(/Last fire:/)
+    const row = screen.getByTestId('auto-nudge-actions')
+    expect(Array.from(row.querySelectorAll('button')).map(b => b.getAttribute('aria-label')))
+      .toEqual(['Stop loop', 'Save edits and nudge now', 'Pause loop', 'Save'])
+    // Stop is the row's own child; the other three share the right-hand cluster.
+    expect(screen.getByRole('button', { name: 'Stop loop' }).parentElement).toBe(row)
+    const cluster = screen.getByTestId('auto-nudge-loop-controls')
+    expect(triggerButton()!.parentElement).toBe(cluster)
+    expect(Array.from(cluster.querySelectorAll('button')).map(b => b.getAttribute('aria-label')))
+      .toEqual(['Save edits and nudge now', 'Pause loop', 'Save'])
+    // And the schedule line is text only -- the button left it.
+    expect(screen.getByTestId('auto-nudge-schedule').querySelectorAll('button')).toHaveLength(0)
+    expect(screen.getByTestId('auto-nudge-schedule').textContent).toMatch(/Last fire:/)
+  })
+})
+
+/** ONE lane for every control (operator ruling, 2026-09-17): Stop pinned left
+ *  as the destructive control, the loop's transport and save controls clustered
+ *  right. RUNNING: [Stop] .. [Trigger][Pause][Save]. PAUSED -- `stopped_reason:
+ *  'manual'`, which is what a `PATCH active:false` records, and the only reason
+ *  that reads "Paused": [Stop] .. [Play], one accented control that saves the
+ *  form, resumes and fires. STOPPED by a bound or a tool: the same shape, Stop
+ *  being the two-step erase and Play reading "Start loop and nudge now". NO
+ *  LOOP: one accented Play that creates the loop from the form and fires it.
+ *  Every fire on this surface persists the form first ("any Trigger implicitly
+ *  calls the Save logic"); Save alone exists only on a running loop. */
+describe('AutoNudgePopover one-lane icon controls (Stop | Trigger Pause Save)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    __resetForTests()
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ loop: null }) })) as unknown as typeof fetch)
+  })
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
+
+  type Call = [string, { method?: string, body?: string }?]
+  const calls = () => (fetch as unknown as { mock: { calls: Call[] } }).mock.calls
+  const patchCalls = () => calls().filter(c => c[1]?.method === 'PATCH')
+  const createCalls = () => calls().filter(c => String(c[0]) === '/api/autonudge' && c[1]?.method === 'POST')
+  const fireCalls = (id = 'l1') => calls().filter(c => String(c[0]) === `/api/autonudge/${id}/fire`)
+  const deleteCalls = () => calls().filter(c => c[1]?.method === 'DELETE').map(c => String(c[0]))
+  const byLabel = (name: string) => screen.queryByRole('button', { name })
+  /** The action row's buttons in DOM order, by aria-label: icon buttons carry no text. */
+  const rowLabels = () =>
+    Array.from(screen.getByTestId('auto-nudge-actions').querySelectorAll('button')).map(b => b.getAttribute('aria-label'))
+  const clusterLabels = () =>
+    Array.from(screen.getByTestId('auto-nudge-loop-controls').querySelectorAll('button')).map(b => b.getAttribute('aria-label'))
+  const PLAY_RESUME = 'Resume loop and nudge now'
+  const PLAY_START = 'Start loop and nudge now'
+  const TRIGGER = 'Save edits and nudge now'
+
+  /** Controlled `open`, as the real parent wires it, so "stays open" is a
+   *  statement about the component and not about a fixed prop. */
+  const renderWith = (loop: AutoNudgeLoop | null, onChange = vi.fn(), writeDisabled = false) => {
+    const onOpenChange = vi.fn()
+    const Harness = () => {
+      const [open, setOpen] = useState(true)
+      return (
+        <AutoNudgePopover
+          slotKey={SLOT}
+          loop={loop}
+          open={open}
+          onOpenChange={v => { onOpenChange(v); setOpen(v) }}
+          onChange={onChange}
+          writeDisabled={writeDisabled}
+        />
+      )
+    }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <Harness />
+      </QueryClientProvider>,
+    )
+    return { onChange, onOpenChange }
+  }
+
+  /** Answer the PATCH with the record the server would return, so the
+   *  component's `onChange` hand-off can be asserted on real data. */
+  function stubPatch(returned: AutoNudgeLoop) {
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(
+          init?.method === 'PATCH' && String(url) === '/api/autonudge/l1' ? { ok: true, loop: returned } : { loop: null },
+        ),
+      }),
+    ) as unknown as typeof fetch)
+  }
+
+  type Refusal = { status: number, error: string }
+  type FireAnswer = { ok: true, loop: AutoNudgeLoop } | { ok: false, status: number, error: string }
+  /** Both legs of a Play or Trigger press: the WRITE (PATCH on `/api/autonudge/l1`,
+   *  or the POST create on `/api/autonudge`) answers `written` (or a refusal),
+   *  the fire route answers `fire`. Everything else (the crons read) stays inert. */
+  function stubWriteThenFire(written: AutoNudgeLoop | Refusal, fire: FireAnswer) {
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      const isWrite = (init?.method === 'PATCH' && String(url) === '/api/autonudge/l1')
+        || (init?.method === 'POST' && String(url) === '/api/autonudge')
+      if (isWrite) {
+        return 'status' in written
+          ? Promise.resolve({ ok: false, status: written.status, json: () => Promise.resolve({ error: written.error }) })
+          : Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, loop: written }) })
+      }
+      if (/\/api\/autonudge\/[^/]+\/fire$/.test(String(url))) {
+        return fire.ok
+          ? Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, loop: fire.loop }) })
+          : Promise.resolve({ ok: false, status: fire.status, json: () => Promise.resolve({ error: fire.error }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ loop: null }) })
+    }) as unknown as typeof fetch)
+  }
+
+  const paused = (over: Partial<AutoNudgeLoop> = {}) =>
+    makeLoop({ active: false, stopped_reason: 'manual', next_due_ts: 0, ...over })
+  const stoppedBy = (reason: string) => makeLoop({ active: false, next_due_ts: 0, stopped_reason: reason })
+  const running = () => makeLoop({ next_due_ts: Math.floor(Date.now() / 1000) + 300 })
+
+  /** Every button in the action row is an icon button: aria-label, a matching
+   *  title (the hover tooltip repeats the label), no text, a glyph. */
+  function expectIconRow(expected: string[]) {
+    expect(rowLabels()).toEqual(expected)
+    for (const name of expected) {
+      const button = byLabel(name)!
+      expect(button, `${name} is missing`).toBeTruthy()
+      expect(button.getAttribute('title')).toBe(name)
+      expect(button.textContent).toBe('')
+      expect(button.querySelector('svg')).toBeTruthy()
+    }
+  }
+
+  it('RUNNING: one row -- Stop alone on the left, Trigger, Pause and Save clustered right, in that order', () => {
+    renderWith(running())
+    expectIconRow(['Stop loop', TRIGGER, 'Pause loop', 'Save'])
+    // Stop is the row's own child; the three others share the right-hand
+    // cluster, so the free space falls between Stop and the cluster.
+    const row = screen.getByTestId('auto-nudge-actions')
+    expect(byLabel('Stop loop')!.parentElement).toBe(row)
+    expect(clusterLabels()).toEqual([TRIGGER, 'Pause loop', 'Save'])
+    // Danger and primary read at rest, not on hover: a touch viewport never
+    // hovers, and the glyphs alone do not say "removes" or "primary".
+    expect(byLabel('Stop loop')!.className).toContain('text-danger')
+    expect(byLabel('Save')!.className).toContain('bg-accent')
+    // The schedule line is text only: the transport controls left it.
+    expect(screen.getByTestId('auto-nudge-schedule').querySelectorAll('button')).toHaveLength(0)
+    expect((byLabel(TRIGGER) as HTMLButtonElement).disabled).toBe(false)
+    // Trigger saves the form, so an empty goal disables it exactly like Save.
+    fireEvent.change(screen.getByLabelText('Goal description'), { target: { value: '  ' } })
+    expect((byLabel(TRIGGER) as HTMLButtonElement).disabled).toBe(true)
+    expect((byLabel('Save') as HTMLButtonElement).disabled).toBe(true)
+    cleanup()
+    // Already due: the press would do nothing, so Trigger is disabled.
+    renderWith(makeLoop({ next_due_ts: 1_700_000_000 }))
+    expect((byLabel(TRIGGER) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('Pause sends PATCH active:false and nothing else, keeps the popover open, and hands the paused record up', async () => {
+    const pausedRecord = paused()
+    stubPatch(pausedRecord)
+    const { onChange, onOpenChange } = renderWith(running())
+
+    await act(async () => { fireEvent.click(byLabel('Pause loop')!) })
+
+    expect(patchCalls()).toHaveLength(1)
+    const [url, init] = patchCalls()[0]
+    expect(url).toBe('/api/autonudge/l1')
+    // ONLY `active`: a pause must not also persist whatever sits in the
+    // fields, and it must never fire anything.
+    expect(JSON.parse(init!.body!)).toEqual({ active: false })
+    expect(fireCalls()).toHaveLength(0)
+    expect(onChange).toHaveBeenCalledWith(pausedRecord)
+    // Like Trigger, and unlike Stop/Save: closing would drop an unsaved edit
+    // in the textarea, and the state change is visible in place.
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('PAUSED: [Stop] .. [Play] -- one accented control, no Save, no Trigger, and the status reads Paused', () => {
+    renderWith(paused())
+    expectIconRow(['Stop loop', PLAY_RESUME])
+    expect(clusterLabels()).toEqual([PLAY_RESUME])
+    // Play IS the primary here, in the accent Save wears on a running loop.
+    expect(byLabel(PLAY_RESUME)!.className).toContain('bg-accent')
+    expect(byLabel('Save')).toBeNull()
+    expect(byLabel('Pause loop')).toBeNull()
+    // Complement assertion, not a bare negative on one node: a stale render
+    // could leave the trigger somewhere else in the tree.
+    expect(screen.queryAllByRole('button', { name: /nudge now/i })).toHaveLength(1)
+    expect(screen.getByTestId('auto-nudge-loop-paused-manually').textContent).toBe('Paused')
+    // The help names both exits AND the whole of what Play does.
+    expect(screen.getByTestId('auto-nudge-paused-help').textContent)
+      .toBe('Play saves your edits, resumes this goal and sends a nudge now. Stop loop removes it for good.')
+    // NOT the stopped path: no "Stopped", no erase-with-confirm, no Start loop.
+    expect(screen.queryByTestId('auto-nudge-loop-paused')).toBeNull()
+    expect(byLabel('Clear stopped goal')).toBeNull()
+    expect(byLabel(PLAY_START)).toBeNull()
+  })
+
+  it('Play on a paused loop is save + resume + run-now in one press: PATCH {fields, active:true}, then POST fire, popover left open', async () => {
+    const resumed = makeLoop({ next_due_ts: Math.floor(Date.now() / 1000) + 90 })
+    stubWriteThenFire(resumed, { ok: true, loop: resumed })
+    const { onChange, onOpenChange } = renderWith(paused())
+
+    await act(async () => { fireEvent.click(byLabel(PLAY_RESUME)!) })
+
+    // Leg 1: the loop goes back to work FROM THE FORM AS IT READS, so a cap
+    // raised in the form travels with the revive instead of the loop
+    // re-stopping on the spent cap, and an edited goal is the goal that fires.
+    expect(patchCalls()).toHaveLength(1)
+    expect(JSON.parse(patchCalls()[0][1]!.body!)).toEqual({ message: 'active loop goal', idle_secs: 90, max_cycles: 3, active: true })
+    // Leg 2: the fire, with NO body, AFTER the PATCH -- `fire_now` refuses an
+    // inactive loop with 409, so the order is load-bearing.
+    expect(fireCalls()).toHaveLength(1)
+    expect(fireCalls()[0][1]?.method).toBe('POST')
+    expect(fireCalls()[0][1]?.body).toBeUndefined()
+    const order = calls().map(c => `${c[1]?.method ?? 'GET'} ${c[0]}`)
+    expect(order.indexOf('PATCH /api/autonudge/l1')).toBeLessThan(order.indexOf('POST /api/autonudge/l1/fire'))
+    // The resumed record is handed up first, then the due reading the fire arms.
+    expect(onChange).toHaveBeenNthCalledWith(1, resumed)
+    expect(onChange).toHaveBeenCalledTimes(2)
+    const due = onChange.mock.calls[1][0] as AutoNudgeLoop
+    expect(due).toMatchObject({ id: 'l1', active: true })
+    expect(Math.abs(due.next_due_ts - Date.now() / 1000)).toBeLessThan(5)
+    // Stays open: the outcome is visible in place (Pause is back, the schedule
+    // line reads due), and a fire refusal needs somewhere to land.
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('Play sends the form as it reads: an edited goal, interval and cap ride the resume', async () => {
+    const resumed = makeLoop({ message: 'edited before play', idle_secs: 120, max_cycles: 50 })
+    stubWriteThenFire(resumed, { ok: true, loop: resumed })
+    renderWith(stoppedBy('cycle_cap'))
+    fireEvent.change(screen.getByLabelText('Goal description'), { target: { value: 'edited before play' } })
+    fireEvent.change(screen.getByLabelText('Seconds between nudges'), { target: { value: '120' } })
+    fireEvent.change(screen.getByLabelText('Max cycles (0 = infinite)'), { target: { value: '50' } })
+
+    await act(async () => { fireEvent.click(byLabel(PLAY_START)!) })
+
+    expect(JSON.parse(patchCalls()[0][1]!.body!)).toEqual({ message: 'edited before play', idle_secs: 120, max_cycles: 50, active: true })
+    expect(fireCalls()).toHaveLength(1)
+  })
+
+  it('a 409 on the fire leg leaves the loop RESUMED and shows the refusal inline; nothing is rolled back', async () => {
+    const REFUSAL = 'loop is already firing'
+    const resumed = makeLoop({ next_due_ts: Math.floor(Date.now() / 1000) + 90 })
+    stubWriteThenFire(resumed, { ok: false, status: 409, error: REFUSAL })
+    const { onChange, onOpenChange } = renderWith(paused())
+
+    await act(async () => { fireEvent.click(byLabel(PLAY_RESUME)!) })
+
+    expect(patchCalls()).toHaveLength(1)
+    expect(fireCalls()).toHaveLength(1)
+    // The resume stands: the record handed up is the resumed one, once.
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(resumed)
+    expect(screen.getByText(REFUSAL)).toBeTruthy()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('a refused resume fires nothing: no POST follows a failed PATCH', async () => {
+    const REFUSAL = 'audit log unavailable — nudge loop not updated'
+    stubWriteThenFire({ status: 503, error: REFUSAL }, { ok: true, loop: makeLoop() })
+    const { onChange } = renderWith(paused())
+
+    await act(async () => { fireEvent.click(byLabel(PLAY_RESUME)!) })
+
+    expect(patchCalls()).toHaveLength(1)
+    expect(fireCalls()).toHaveLength(0)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByText(REFUSAL)).toBeTruthy()
+  })
+
+  it.each([
+    ['cycle_cap', 'a spent cycle cap'],
+    ['runtime_budget', 'a spent wall-clock budget'],
+    ['approval_stalled', 'an approval stall'],
+    ['autonudge_stop', 'the autonudge_stop tombstone'],
+    ['', 'a stop with no recorded reason'],
+  ])('STOPPED by %s keeps the same shape -- Stop is the two-step erase, Play reads Start loop, no Save -- and still says Stopped, never Paused', async (reason) => {
+    renderWith(stoppedBy(reason))
+    expect(screen.getByTestId('auto-nudge-loop-paused').textContent).toBe('Stopped')
+    expect(screen.getByTestId('auto-nudge-stopped-help').textContent)
+      .toBe('Play saves your edits, restarts this goal and sends a nudge now. Clear stopped goal removes it for good.')
+    expectIconRow(['Clear stopped goal', PLAY_START])
+    expect(clusterLabels()).toEqual([PLAY_START])
+    expect(byLabel(PLAY_START)!.className).toContain('bg-accent')
+    // None of the running/paused-only controls leak into a stopped loop, and
+    // the status is not the resumable one.
+    for (const name of ['Pause loop', PLAY_RESUME, TRIGGER, 'Stop loop', 'Save']) {
+      expect(byLabel(name), `${name} rendered on a stopped loop`).toBeNull()
+    }
+    expect(screen.queryByTestId('auto-nudge-loop-paused-manually')).toBeNull()
+
+    // Stop here is the erase of the retained record, and it asks first: the
+    // row becomes the confirm (Cancel / Clear goal for good), the help line
+    // becomes the question, and nothing has been sent yet.
+    await act(async () => { fireEvent.click(byLabel('Clear stopped goal')!) })
+    expect(deleteCalls()).toEqual([])
+    expect(screen.queryByTestId('auto-nudge-actions')).toBeNull()
+    const confirmRow = byLabel('Cancel')!.parentElement!
+    expect(Array.from(confirmRow.querySelectorAll('button')).map(b => b.textContent)).toEqual(['Cancel', 'Clear goal for good'])
+    expect(screen.getByTestId('auto-nudge-stopped-help').textContent).toBe('Remove this goal for good?')
+    await act(async () => { fireEvent.click(byLabel('Cancel')!) })
+    expect(rowLabels()).toEqual(['Clear stopped goal', PLAY_START])
+  })
+
+  it('a record that never carried stopped_reason at all is still Stopped, never Paused', () => {
+    // `undefined` is "not known here", and an unknown reason must fail toward
+    // the non-resumable reading: only an explicit `manual` earns Resume.
+    const loop = makeLoop({ active: false, next_due_ts: 0 })
+    delete (loop as Partial<AutoNudgeLoop>).stopped_reason
+    renderWith(loop)
+    expect(screen.getByTestId('auto-nudge-loop-paused').textContent).toBe('Stopped')
+    expect(byLabel(PLAY_RESUME)).toBeNull()
+    expect(byLabel(PLAY_START)).toBeTruthy()
+  })
+
+  it('NO LOOP: a single accented Play that creates the loop from the form and then fires it on the returned id -- no Stop, no Save', async () => {
+    const created = makeLoop({ id: 'l-new', message: 'brand new goal', idle_secs: 60, max_cycles: 0, cycle_count: 0, next_due_ts: Math.floor(Date.now() / 1000) + 60 })
+    stubWriteThenFire(created, { ok: true, loop: created })
+    const { onChange, onOpenChange } = renderWith(null)
+    expectIconRow([PLAY_START])
+    // The accent today's "Start loop" text button wore, so the one control on
+    // an empty popover still reads as the primary action.
+    expect(byLabel(PLAY_START)!.className).toContain('bg-accent')
+    expect(byLabel(PLAY_START)!.parentElement).toBe(screen.getByTestId('auto-nudge-loop-controls'))
+    for (const name of ['Stop loop', 'Clear stopped goal', 'Save', 'Pause loop', PLAY_RESUME, TRIGGER]) {
+      expect(byLabel(name), `${name} rendered with no loop`).toBeNull()
+    }
+    expect(screen.queryByTestId('auto-nudge-schedule')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Goal description'), { target: { value: 'brand new goal' } })
+
+    await act(async () => { fireEvent.click(byLabel(PLAY_START)!) })
+
+    // Leg 1: today's create, from the form.
+    expect(createCalls()).toHaveLength(1)
+    expect(JSON.parse(createCalls()[0][1]!.body!)).toEqual({ slot_key: SLOT, message: 'brand new goal', idle_secs: 60, max_cycles: 0 })
+    // Leg 2: the fire on the id the server RETURNED (there was no loop to know
+    // before), so the first nudge goes out now rather than after idle_secs.
+    expect(fireCalls('l-new')).toHaveLength(1)
+    expect(fireCalls('l-new')[0][1]?.method).toBe('POST')
+    expect(fireCalls('l-new')[0][1]?.body).toBeUndefined()
+    const order = calls().map(c => `${c[1]?.method ?? 'GET'} ${c[0]}`)
+    expect(order.indexOf('POST /api/autonudge')).toBeLessThan(order.indexOf('POST /api/autonudge/l-new/fire'))
+    expect(onChange).toHaveBeenNthCalledWith(1, created)
+    expect((onChange.mock.calls[1][0] as AutoNudgeLoop)).toMatchObject({ id: 'l-new', active: true })
+    // Stays open like every other control that fires: the created loop's lane
+    // (Stop | Trigger Pause Save) and the due reading appear in place, and a
+    // fire refusal needs somewhere to land. Only Save closes the popover.
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('a 409 on the no-loop fire leaves the loop CREATED and armed, with the refusal shown inline', async () => {
+    const REFUSAL = 'nudge not sent: the agent is still working, so try again when it finishes'
+    const created = makeLoop({ id: 'l-new', cycle_count: 0, next_due_ts: Math.floor(Date.now() / 1000) + 90 })
+    stubWriteThenFire(created, { ok: false, status: 409, error: REFUSAL })
+    const { onChange, onOpenChange } = renderWith(null)
+
+    await act(async () => { fireEvent.click(byLabel(PLAY_START)!) })
+
+    expect(createCalls()).toHaveLength(1)
+    expect(fireCalls('l-new')).toHaveLength(1)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(created)
+    expect(screen.getByText(REFUSAL)).toBeTruthy()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('the no-loop Play is disabled on an empty goal, like the Save it replaces', () => {
+    renderWith(null)
+    fireEvent.change(screen.getByLabelText('Goal description'), { target: { value: '   ' } })
+    expect((byLabel(PLAY_START) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('Save exists only on a running loop: a plain PATCH of the fields, never active, never a fire, and it closes the popover as it always did', async () => {
+    const saved = makeLoop({ message: 'edited' })
+    stubPatch(saved)
+    const { onChange, onOpenChange } = renderWith(running())
+    fireEvent.change(screen.getByLabelText('Goal description'), { target: { value: 'edited' } })
+
+    await act(async () => { fireEvent.click(byLabel('Save')!) })
+
+    expect(patchCalls()).toHaveLength(1)
+    const body = JSON.parse(patchCalls()[0][1]!.body!)
+    expect(body).toEqual({ message: 'edited', idle_secs: 90, max_cycles: 3 })
+    // Load-bearing both ways: `active: true` would silently revive a loop
+    // another tab paused between render and press, and `active: false` would
+    // pause a running one.
+    expect(body).not.toHaveProperty('active')
+    expect(fireCalls()).toHaveLength(0)
+    expect(onChange).toHaveBeenCalledWith(saved)
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('Stop on a running or paused loop is a single press with the stop intent; the erase intent travels only after the confirm', async () => {
+    renderWith(running())
+    await act(async () => { fireEvent.click(byLabel('Stop loop')!) })
+    expect(deleteCalls()).toEqual(['/api/autonudge/l1?intent=stop'])
+    cleanup()
+
+    // A paused loop is a live goal in a paused state, so its Stop is the
+    // running loop's single-press Stop -- not the two-step erase a stopped
+    // loop gets -- and the pressed intent travels with the request.
+    renderWith(paused())
+    await act(async () => { fireEvent.click(byLabel('Stop loop')!) })
+    expect(deleteCalls()).toEqual(['/api/autonudge/l1?intent=stop', '/api/autonudge/l1?intent=stop'])
+    expect(byLabel('Clear goal for good')).toBeNull()
+    cleanup()
+
+    renderWith(stoppedBy('cycle_cap'))
+    await act(async () => { fireEvent.click(byLabel('Clear stopped goal')!) })
+    await act(async () => { fireEvent.click(byLabel('Clear goal for good')!) })
+    expect(deleteCalls().at(-1)).toBe('/api/autonudge/l1?intent=clear')
+  })
+
+  it('surfaces a refused pause inline and keeps the popover open', async () => {
+    const REFUSAL = 'audit log unavailable — nudge loop not updated'
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) =>
+      init?.method === 'PATCH'
+        ? Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({ error: REFUSAL }) })
+        : Promise.resolve({ ok: true, json: () => Promise.resolve({ loop: null }) }),
+    ) as unknown as typeof fetch)
+    const { onChange, onOpenChange } = renderWith(makeLoop())
+
+    await act(async () => { fireEvent.click(byLabel('Pause loop')!) })
+
+    expect(screen.getByText(REFUSAL)).toBeTruthy()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('disables Pause, Trigger, Play and Save but not Stop while writes are disabled', () => {
+    // Every control that writes the record follows one gate -- and every
+    // fire now writes first, so Trigger and Play are in it; Stop stays
+    // reachable for stale state, as before.
+    renderWith(running(), vi.fn(), true)
+    expect((byLabel('Pause loop') as HTMLButtonElement).disabled).toBe(true)
+    expect((byLabel(TRIGGER) as HTMLButtonElement).disabled).toBe(true)
+    expect((byLabel('Save') as HTMLButtonElement).disabled).toBe(true)
+    expect((byLabel('Stop loop') as HTMLButtonElement).disabled).toBe(false)
+    cleanup()
+    renderWith(paused(), vi.fn(), true)
+    expect((byLabel(PLAY_RESUME) as HTMLButtonElement).disabled).toBe(true)
+    expect((byLabel('Stop loop') as HTMLButtonElement).disabled).toBe(false)
+    cleanup()
+    renderWith(null, vi.fn(), true)
+    expect((byLabel(PLAY_START) as HTMLButtonElement).disabled).toBe(true)
   })
 })
 

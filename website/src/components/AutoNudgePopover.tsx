@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Goal, Radar, X } from 'lucide-react'
+import { Goal, Pause, Play, Radar, Save as SaveIcon, Square, X, Zap } from 'lucide-react'
 import { Popover, PopoverTrigger, PopoverContent } from './ui/popover'
 import { Btn } from './ui'
 import ErrorNotice from './ErrorNotice'
@@ -47,6 +47,14 @@ interface Props {
  * exact spelling; a test pins that the template still carries it.
  */
 export const STOP_FILE_TOKEN = '{{STOP_FILE}}'
+
+/**
+ * The service's `MANUAL_STOP_REASON` (`src/kiro_crew/autonudge.py`): the
+ * `stopped_reason` a `PATCH active:false` records, and the one the revive logic
+ * never auto-resumes. Spelled here because the frontend shares no constants
+ * module with the service; `autoNudgeLoop.ts` lists the other codes.
+ */
+const MANUAL_STOP_REASON = 'manual'
 
 const DEFAULT_MSG = `Your north star is in north_star.md, roadmap in roadmap.md, tasks in tasks.md. Pick the single highest-leverage next step toward the goal and execute it. Update tasks.md. Post a blocker ONCE if genuinely stuck. To halt the loop, create {{STOP_FILE}}`
 
@@ -205,19 +213,43 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `draftToPersist` is a pure transform of the ref snapshot it is handed, redeclared each render, so its identity carries no information the deps above miss. Depending on it would restart the debounce timer on every unrelated re-render — the coalescing this effect exists for.
   }, [open, slotKey, message, idleInput, maxCyclesInput, loop])
 
+  /** A loop somebody PAUSED -- inactive, with the reason a manual pause records
+   *  -- as opposed to one a bound spent (`cycle_cap`, `runtime_budget`,
+   *  `approval_stalled`), a tool tombstoned (`autonudge_stop`), or one whose
+   *  reason is unknown here. Only this state reads "Paused" and labels its Play
+   *  "Resume loop"; everything else inactive reads "Stopped" and its Play reads
+   *  "Start loop", with Stop becoming the erase of the retained record. Strict
+   *  equality on purpose: an absent reason means "not known here", and the safe
+   *  reading of unknown is the non-resumable one. */
+  const pausedManually = !!loop && !loop.active && loop.stopped_reason === MANUAL_STOP_REASON
+
+  /** The three fields as the form holds them right now. Parsed from the raw
+   *  strings (not a committed number state) so a value typed and then pressed
+   *  without an intervening blur is still captured. */
+  function formFields() {
+    return { message, idle_secs: parseIdle(idleInput), max_cycles: parseCycles(maxCyclesInput) }
+  }
+
+  const JSON_HEADERS = { 'Content-Type': 'application/json' }
+
+  /** Save, on a RUNNING loop only: persist the three fields, nothing else.
+   *
+   *  Never carries `active`. Starting, resuming and reviving belong to Play,
+   *  so a save of edited fields leaves the loop running exactly as it was; the
+   *  field would be a no-op while the loop is still running and exactly wrong
+   *  when it is not -- another tab's Pause, or a spent bound, can land between
+   *  this render and the press, and a save carrying `active: true` would then
+   *  revive the loop (`update` clears the stop reason and re-arms the timer)
+   *  as a side effect of editing text. The one control on this surface that
+   *  CLOSES the popover on success, as it always did: it changes nothing the
+   *  popover could show, so closing is its confirmation. Every control that
+   *  fires or changes the run state stays open instead (see `writeThenFire`). */
   async function save() {
-    if (writeDisabled) return
+    if (!loop || writeDisabled) return
     setSaving(true)
     setError('')
     try {
-      // Parse from the raw strings here (not a committed number state) so a value
-      // typed and then Save-clicked without an intervening blur is still captured.
-      const idle_secs = parseIdle(idleInput)
-      const max_cycles = parseCycles(maxCyclesInput)
-      const body = JSON.stringify({ slot_key: slotKey, message, idle_secs, max_cycles })
-      const resp = loop
-        ? await fetch(`/api/autonudge/${loop.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, idle_secs, max_cycles, active: true }) })
-        : await fetch('/api/autonudge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      const resp = await fetch(`/api/autonudge/${loop.id}`, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(formFields()) })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
       onChange(data.loop)
@@ -229,7 +261,8 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
     }
   }
 
-  async function stop() {
+  /** Stop a live (running or paused) loop, or clear an already-stopped one. */
+  async function stop(intent: 'stop' | 'clear') {
     if (!loop) return
     setSaving(true)
     try {
@@ -237,8 +270,9 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
       // decides what this verb means from the record's state at arrival time:
       // a press meant as "Stop loop" on a popover rendered moments earlier
       // would silently ERASE a record that went terminal in between. The server
-      // 409s on a mismatch instead, and the popover surfaces that.
-      const intent = loop.active ? 'stop' : 'clear'
+      // 409s on a mismatch instead, and the popover surfaces that. It is the
+      // LABEL the user pressed, supplied by the button, never re-derived from
+      // `loop.active` here: a paused loop is inactive yet its control is Stop.
       const resp = await fetch(`/api/autonudge/${loop.id}?intent=${intent}`, { method: 'DELETE' })
       if (!resp.ok) {
         // Parse JSON body for server-supplied error (e.g. 503 when feature disabled).
@@ -255,56 +289,133 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
     }
   }
 
-  /** Run the loop's next cycle now instead of waiting out the remaining gap.
+  /** Pause the loop IN PLACE (`active: false`).
    *
-   *  Sends NO body: the nudge fired is whatever the loop currently holds, read
-   *  server-side, so the button stays correct after a `monitor_update` revises
-   *  the instruction and a stale popover field can never be delivered as the
-   *  prompt. The consequence is that a user who edited the message and pressed
-   *  this gets the ARMED message, not the edited one.
+   *  No new backend: `PATCH /api/autonudge/{id}` already accepts `active`, and
+   *  the service records `stopped_reason: "manual"` on a pause
+   *  (`_update_unserialized` in `src/kiro_crew/autonudge.py`) -- the reason that
+   *  tells the paused state from a stopped one when the record comes back. The
+   *  body carries ONLY `active`: a pause is not a save, so whatever sits in the
+   *  fields stays unsaved and un-sent.
    *
-   *  WHICH IS WHY THIS DOES NOT CLOSE THE POPOVER, unlike `save` and `stop`.
-   *  Closing would drop that unsaved edit with no dirty guard (drafts are not
-   *  persisted while a loop exists), so a press after an edit would cost the
-   *  user their text as well as spending a turn on the old prompt. Leaving the
-   *  popover open keeps the edit, keeps Save reachable, and makes the outcome
-   *  visible in place: the schedule line beside the button flips to "due", and
-   *  the header's cycle readout advances a moment later when the delivered fire
-   *  broadcasts (`autonudge_state`), which is also where the press's cost
-   *  against the cycle cap becomes observable.
-   *
-   *  Refusals (409 for a mid-fire loop or a session with a turn in flight, 404
-   *  for a loop the server no longer holds) land in the same inline
-   *  `ErrorNotice` as `save` and `stop`. */
-  async function triggerNow() {
-    if (!loop) return
+   *  Does NOT close the popover, for the same reason `triggerNow` does not: the
+   *  textarea may hold an unsaved edit with no dirty guard, and the outcome is
+   *  visible in place -- the countdown gives way to "Paused" and this control's
+   *  slot flips to Play. */
+  async function pause() {
+    if (!loop || writeDisabled) return
     setSaving(true)
     setError('')
     try {
-      const resp = await fetch(`/api/autonudge/${loop.id}/fire`, { method: 'POST' })
+      const resp = await fetch(`/api/autonudge/${loop.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active: false }) })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
-      // The route returns the loop UNCHANGED: the server-side deadline write was
-      // removed because it could not be made durable without a suspension point
-      // that raced several lock-free writers. Rendering the response verbatim
-      // would therefore leave the countdown showing the very cycle this press
-      // superseded -- the one visible confirmation a press has. So the armed
-      // deadline is set here instead. Not a fiction: the cycle IS armed to run
-      // now, and the delivery's `autonudge_state` frame reconciles the shared
-      // cache moments later.
-      onChange({ ...data.loop, next_due_ts: Date.now() / 1000 })
-      // Keep the SHARED registry consistent with the local view. `onChange` only
-      // updates this popover, so a reader of the full registry -- the Crew Members
-      // patrol block -- would otherwise keep its cached copy until the delivery's
-      // `autonudge_state` frame arrives. Nothing about the deadline changes here
-      // any more, so this is about the two views never disagreeing rather than
-      // about a stale countdown.
+      onChange(data.loop)
+      // The full-registry readers (the Crew Members patrol block) must not keep
+      // showing a countdown for a loop that just paused; same reconciliation
+      // `triggerNow` performs.
       void queryClient.invalidateQueries({ queryKey: AUTONUDGE_LOOPS_QUERY_KEY })
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
     }
+  }
+
+  /** WRITE the loop's record, hand the returned record up, then FIRE it.
+   *
+   *  Every control on this surface that fires goes through here, because every
+   *  fire implicitly saves ("any Trigger implicitly calls the Save logic"):
+   *  Play on a paused or stopped loop writes the form with `active: true` and
+   *  fires (`resumeNow`); Play with no loop creates the loop from the form and
+   *  fires the id the server returned (`startNow`); Trigger on a running loop
+   *  writes the form without `active` and fires (`triggerNow`). The flow this
+   *  buys is pause -> edit the goal, interval or cap -> press Play, with no
+   *  separate Save, and a cap raised in the form travelling with the revive
+   *  instead of the loop re-stopping a tick later on the spent cap.
+   *
+   *  The write comes FIRST because `fire_now` fires whatever the loop holds and
+   *  refuses an inactive loop with 409: firing before the write would fire the
+   *  old goal, or nothing. The two legs are NOT a transaction, on purpose. A
+   *  refused write fires nothing -- there is nothing to fire. A write that
+   *  lands followed by a refused fire (409 while a turn is in flight, or
+   *  mid-fire) leaves the loop written -- saved, resumed or created -- with the
+   *  refusal in the inline notice: the user asked for two things and got one,
+   *  and rolling the write back would turn a refused shortcut into an undone
+   *  edit or an undone pause.
+   *
+   *  STAYS OPEN, in every case, and so do Pause and Play. The outcome is
+   *  visible in place -- the lane flips (a created or resumed loop shows Stop |
+   *  Trigger Pause Save, a schedule line reads due), and a refusal needs
+   *  somewhere to land. Only Save closes the popover (see `save`): it is the
+   *  one control whose result the popover cannot show. */
+  async function writeThenFire(write: () => Promise<Response>) {
+    if (writeDisabled) return
+    setSaving(true)
+    setError('')
+    try {
+      const resp = await write()
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+      onChange(data.loop)
+      // The full-registry readers (the Crew Members patrol block) must not keep
+      // a stale copy of a record this write just changed.
+      void queryClient.invalidateQueries({ queryKey: AUTONUDGE_LOOPS_QUERY_KEY })
+      // The fire needs the record's id: for a create it is the one the server
+      // just minted, so it is read off the response rather than the closure.
+      if (data.loop?.id) await fireNow(String(data.loop.id))
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** The fire leg: bring the loop's next cycle forward to now.
+   *
+   *  Sends NO body -- the nudge fired is whatever the loop holds, read
+   *  server-side, which the write a moment earlier made the form's text.
+   *  The route returns the loop UNCHANGED: the server-side deadline write was
+   *  removed because it could not be made durable without a suspension point
+   *  that raced several lock-free writers. Rendering the response verbatim
+   *  would therefore leave the countdown showing the very cycle this press
+   *  superseded -- the one visible confirmation a press has. So the armed
+   *  deadline is set here instead. Not a fiction: the cycle IS armed to run
+   *  now, and the delivery's `autonudge_state` frame reconciles the shared
+   *  cache moments later. Throws on refusal so `writeThenFire` lands it in
+   *  the inline notice. */
+  async function fireNow(loopId: string) {
+    const resp = await fetch(`/api/autonudge/${loopId}/fire`, { method: 'POST' })
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+    onChange({ ...data.loop, next_due_ts: Date.now() / 1000 })
+    void queryClient.invalidateQueries({ queryKey: AUTONUDGE_LOOPS_QUERY_KEY })
+  }
+
+  /** Play on a paused or stopped loop: save the form, resume (or revive), fire.
+   *  `active: true` clears the stop reason and re-arms the timer on a fresh full
+   *  countdown (`_update_unserialized`), one interval too late for a user who
+   *  just pressed Play -- hence the fire leg. */
+  function resumeNow() {
+    if (!loop) return
+    return writeThenFire(() =>
+      fetch(`/api/autonudge/${loop.id}`, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ ...formFields(), active: true }) }))
+  }
+
+  /** Play with no loop: create it from the form (today's POST), then fire the
+   *  new id so the first nudge goes out now rather than after `idle_secs`. */
+  function startNow() {
+    return writeThenFire(() =>
+      fetch('/api/autonudge', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ slot_key: slotKey, ...formFields() }) }))
+  }
+
+  /** Trigger on a running loop: save the form (never `active` -- a running
+   *  loop's write must not be able to revive one another tab paused between
+   *  render and press), then fire. */
+  function triggerNow() {
+    if (!loop) return
+    return writeThenFire(() =>
+      fetch(`/api/autonudge/${loop.id}`, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(formFields()) }))
   }
 
   // ── Countdown to the next trigger (#6482) ──
@@ -546,70 +657,49 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
           </div>
         </div>
 
-        {/* The trigger sits on the SCHEDULE line, not in the action row below.
-            Two reasons, and they point the same way. `max-two-buttons-per-row`
-            (website/AUTOSDE.yaml:230, blocking) holds a row to two controls and
-            names this exact escape -- "the third action ... goes into an
-            overflow DropdownMenu, or LEAVES THE ROW" -- and leaving is cheaper
-            than a menu for one action. And it belongs here on the merits: this
-            button changes the countdown printed beside it, so the control and
-            the state it acts on read as one thing, while Stop/Save act on the
-            loop's configuration.
-            A one-button group, so the cap is satisfied structurally rather than
-            by being under it today. Button classes are the popover's existing
-            small-button spelling (the watches Retry above).
-            Gated on `active`, not merely on `loop`: a paused record still opens
-            this popover, and every terminal bound leaves the loop inactive, so
-            the server refuses to fire one -- a button there could only ever
-            produce a 409. */}
+        {/* The SCHEDULE line: last fire, the countdown (or "Paused" / "Stopped"),
+            and the help sentence naming the exits. Text only -- every control
+            lives in the single action row below (operator ruling, 2026-09-17),
+            so nothing here relocates under a cursor when the countdown flips to
+            the longer "due" wording. Rendered for every loop; with no loop
+            there is no schedule to read. */}
         {loop && (
-          /* `flex-wrap` is for STRING LENGTH, not for 320px: the width cap on the
-             shell is what keeps this row inside the viewport, and measurement says
-             so -- pinning the shell back to 420px reddens the narrow frame while
-             removing this wrap does not. It is kept because `shrink-0` protects the
-             button, so a longer localized countdown ("Next cycle due, fires after
-             the current turn" is materially longer in several of the twelve
-             catalogues) has only this row to give. Defensive, and labelled as such
-             rather than claimed as the fix. */
-          /* STACKED in every state, not a wrapping row. When the countdown flips to
-             the longer "due" wording, a wrapping row moved the button from beside the
-             text onto its own line -- relocating a control directly under the cursor
-             that just pressed it. One layout at every width also means the narrow
-             frame and the desktop frame agree, instead of the 320px case being a
-             second shape to keep in sync. */
-          <div className="flex flex-col items-start gap-1 mb-3">
+          <div className="flex flex-col items-start gap-1 mb-3" data-testid="auto-nudge-schedule">
             <div className="text-muted text-[11px]">
               {i18nT('components.autoNudgePopover.last_fire')} {loop.last_fire_ts ? fmtTimeNumeric(loop.last_fire_ts) : i18nT('components.autoNudgePopover.never')}
               {countdownText && <span> · {countdownText}</span>}
+              {/* "Paused" takes the countdown's slot: a paused loop holds no
+                  schedule (`next_due_ts` is cleared), so the state IS the
+                  schedule reading. Says "Paused" -- the word the Stopped branch
+                  below deliberately avoids -- because here it is true: the Play
+                  in the row resumes this same record where it left off. */}
+              {pausedManually && (
+                <span> · <span data-testid="auto-nudge-loop-paused-manually">{i18nT('components.autoNudgePopover.loop_paused')}</span></span>
+              )}
             </div>
-            {loop.active ? (
-              <button
-                type="button"
-                onClick={triggerNow}
-                /* Disabled once a cycle is already due, which is what a successful
-                   press produces. Before this the button re-enabled unchanged, so
-                   the press acknowledged itself only through the schedule line's
-                   wording -- a usability reader would not press it a second time
-                   because they could not tell whether that would double the nudge
-                   or do nothing (it does nothing: the cycle is already armed). The
-                   disabled state answers that question without a new string. */
-                disabled={saving || cycleAlreadyDue}
-                className="px-2 py-0.5 rounded border border-border text-[11px] text-muted hover:text-text hover:border-accent bg-transparent cursor-pointer shrink-0 disabled:opacity-50"
-              >
-                {i18nT('components.autoNudgePopover.trigger_nudge')}
-              </button>
-            ) : (
-              /* Says WHY the button is not here, rather than leaving a gap. A
+            {pausedManually ? (
+              /* Names both exits, as the stopped help does, and says what Play
+                 does beyond resuming: it also sends a nudge now. Stop removes
+                 the record for good and nothing else on the surface says so. */
+              <span data-testid="auto-nudge-paused-help" className="text-muted text-[11px]">
+                {i18nT('components.autoNudgePopover.paused_help')}
+              </span>
+            ) : !loop.active ? (
+              /* Says WHY there is no countdown, rather than leaving a gap. A
                  blind reader of the stopped screenshot could not tell it was the
                  same loop at all, and an inactive loop otherwise looks identical
-                 to an active one whose button failed to render -- the state is
+                 to an active one whose countdown failed to render -- the state is
                  the reason for the absence, so it belongs in the space the
-                 absence leaves. Text, not a disabled button: the server refuses
-                 to fire an inactive loop, so there is no press to offer.
-                 Reads "Stopped", not "Paused": the button beside it removes this
+                 absence leaves.
+                 Reads "Stopped", not "Paused": the Stop in the row removes this
                  record for good, and a blind reader took "Paused" as "it
                  remembers where it left off" -- a resumable-sounding status next
                  to an erase control is the mixed message a UX review blocked on.
+                 That reasoning still holds here, and it is exactly why "Paused"
+                 is reserved for the ONE inactive state that IS resumable in
+                 place: a loop with the manual-pause reason, handled above. A
+                 spent bound, a tool's tombstone and an unknown reason all land
+                 here and stay "Stopped".
                  The help line under it names both exits, because the erase is
                  irreversible and nothing else on the surface says so. */
               <div className="flex flex-col items-start gap-0.5">
@@ -620,7 +710,7 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
                   {i18nT('components.autoNudgePopover.loop_stopped')}
                 </span>
                 {/* While confirming, this line must not keep naming the two
-                    buttons that just left the row -- a blind reader looked for
+                    controls that just left the row -- a blind reader looked for
                     the "Start loop" it describes and could not find it -- and
                     the confirmation row itself renders no question. So the help
                     line BECOMES the question for that state. */}
@@ -630,7 +720,7 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
                     : i18nT('components.autoNudgePopover.stopped_help')}
                 </span>
               </div>
-            )}
+            ) : null}
           </div>
         )}
 
@@ -643,67 +733,154 @@ export default function AutoNudgePopover({ slotKey, loop, open, onOpenChange, on
           onDismiss={() => setError('')}
         />
 
-        <div className="flex gap-2 justify-end">
-          {loop && (
-            loop.active ? (
-              <button
-                onClick={stop}
+        {/* THE ACTION ROW -- every control on ONE lane.
+            Layout ruled by the product owner on 2026-09-17: Stop isolated left
+            as the destructive control, the loop's transport and save controls
+            clustered right; an overflow menu was explicitly rejected because
+            every control must stay visible. This knowingly exceeds
+            `max-two-buttons-per-row` (website/AUTOSDE.yaml:230): a running
+            loop puts four controls on the lane, three of them in the right
+            cluster. The finding that rule draws is answered by the ruling, not
+            by a rework -- the PR body's Other section carries the same text.
+            The lane by state (Stop pinned left, free space, then the cluster):
+              RUNNING            [Stop] ........ [Trigger] [Pause] [Save]
+              PAUSED (manual)    [Stop] ........ [Play]            accent
+              STOPPED (a bound,  [Stop] ........ [Play]            accent;
+                a tombstone)                     Stop = erase behind a confirm
+              NO LOOP                             [Play]            accent, alone
+            Every control that fires SAVES THE FORM FIRST ("any Trigger
+            implicitly calls the Save logic", see `writeThenFire`): Play on a
+            paused or stopped loop writes the form with `active: true` and
+            fires; Play with no loop creates the loop from the form and fires
+            it; Trigger on a running loop writes the form and fires. So an
+            inactive loop needs no Save -- pause, edit, press Play -- and Save
+            alone exists only while the loop runs. Play's label says which:
+            "Resume loop and nudge now" for the paused record, "Start loop and
+            nudge now" otherwise. Trigger exists only while running, because
+            the server refuses to fire an inactive loop (409) and Play already
+            fires on the way back. Every control is an icon button with
+            aria-label AND title (`icon-buttons-need-labels`): the glyph carries
+            no text of its own. */}
+        {loop && confirmClear ? (
+          /* The erase confirm REPLACES the lane, as the monitor surface's
+             identical confirm does: the choice should hold the reader's whole
+             attention, and the help line above has become the question. Each
+             label restates the ACTION and its object rather than answering a
+             question the row does not render: read alone, "Yes" says nothing
+             about what is being cleared. */
+          <div className="flex gap-2 justify-end">
+            <Btn type="button" onClick={() => setConfirmClear(false)} disabled={saving}>
+              {i18nT('components.autoNudgePopover.cancel')}
+            </Btn>
+            <Btn type="button" danger onClick={() => stop('clear')} disabled={saving}>
+              {i18nT('components.autoNudgePopover.clear_goal_for_good')}
+            </Btn>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2" data-testid="auto-nudge-actions">
+            {loop && (
+              /* Stop, alone on the left. On a running or paused loop it is the
+                 single-press stop, as before -- a paused loop is the same live
+                 goal with its countdown suspended, not a stopped record. On an
+                 already-stopped loop there is nothing left to stop: the press
+                 REMOVES the retained record, which is what frees the slot to
+                 watch something else, so it is labelled for that ("Stop loop"
+                 read as a no-op) and asks first, because the erase is
+                 irreversible. `Btn danger` colours it unconditionally rather
+                 than on :hover, which a touch viewport never produces: the
+                 glyph alone does not say "removes". Reachable while writes are
+                 disabled, so stale state can always be cleared. */
+              <Btn
+                type="button"
+                danger
+                className="!px-1.5"
+                aria-label={loop.active || pausedManually ? i18nT('components.autoNudgePopover.stop_loop') : i18nT('components.autoNudgePopover.clear_stopped_goal')}
+                title={loop.active || pausedManually ? i18nT('components.autoNudgePopover.stop_loop') : i18nT('components.autoNudgePopover.clear_stopped_goal')}
+                onClick={() => (loop.active || pausedManually ? stop('stop') : setConfirmClear(true))}
                 disabled={saving}
-                className="px-3 py-1 rounded border border-border text-muted hover:text-danger hover:border-danger bg-transparent cursor-pointer disabled:opacity-50"
               >
-                {i18nT('components.autoNudgePopover.stop_loop')}
-              </button>
-            ) : confirmClear ? (
-              /* The same two-step the monitor surface uses for its identical
-                 erase. Each label restates the ACTION and its object rather
-                 than answering a question the row does not render: read alone,
-                 "Yes" says nothing about what is being cleared. */
-              <>
-                <Btn type="button" onClick={() => setConfirmClear(false)} disabled={saving}>
-                  {i18nT('components.autoNudgePopover.cancel')}
-                </Btn>
-                <Btn type="button" danger onClick={stop} disabled={saving}>
-                  {i18nT('components.autoNudgePopover.clear_goal_for_good')}
-                </Btn>
-              </>
-            ) : (
-              /* On an already-stopped loop this press REMOVES the record, which
-                 is what frees the slot to watch something else -- labelling it
-                 "Stop loop" made it read as a no-op. It names the GOAL rather
-                 than an internal noun, because a blind reader refused to press
-                 "Clear record" for showing nothing called a record.
-                 `Btn danger` colours it unconditionally rather than on :hover,
-                 which a touch viewport never produces, and it sits behind a
-                 confirm because it is an irreversible erase one slot from the
-                 primary CTA -- the monitor surface's identical erase is guarded
-                 exactly so. */
-              <Btn type="button" danger onClick={() => setConfirmClear(true)} disabled={saving}>
-                {i18nT('components.autoNudgePopover.clear_stopped_goal')}
+                <Square size={14} fill="currentColor" aria-hidden />
               </Btn>
-            )
-          )}
-          {/* Withheld while the clear is being confirmed: three controls in one
-              row breaks the two-per-row cap (website/AUTOSDE.yaml:230), and the
-              confirmation should hold the reader's whole choice -- the monitor
-              surface's own confirm replaces its row for the same reason. */}
-          {!confirmClear && (
-            <button
-              onClick={save}
-              disabled={saving || writeDisabled || !message.trim()}
-              className="px-3 py-1 rounded bg-accent text-accent-fg border-none cursor-pointer disabled:opacity-50 hover:bg-accent/90"
-            >
-              {/* A paused loop's way out was invisible: this button silently PATCHes
-                  `active: true`, so on an inactive loop it must SAY so. A usability
-                  reader found no resume control at all and called both "Stopped" and
-                  "Stop loop" risky as a result. Gated on `active`, not on existence,
-                  which is the bug -- and it reuses the `start_loop` key the no-loop
-                  case already uses, so no catalogue gains a string. */}
-              {loop?.active
-                ? i18nT('components.autoNudgePopover.save')
-                : i18nT('components.autoNudgePopover.start_loop')}
-            </button>
-          )}
-        </div>
+            )}
+            {/* `ml-auto` pushes the cluster right whether or not Stop is
+                rendered, so the no-loop Play sits where the cluster sits on a
+                loop. Every write-gated control shares one disabled rule: busy,
+                writes disabled, or an empty goal -- each of them sends the
+                form, and an empty goal is not a goal. */}
+            <div className="ml-auto flex items-center gap-2" data-testid="auto-nudge-loop-controls">
+              {loop?.active ? (
+                <>
+                  <Btn
+                    type="button"
+                    className="!px-1.5"
+                    aria-label={i18nT('components.autoNudgePopover.trigger_nudge')}
+                    title={i18nT('components.autoNudgePopover.trigger_nudge')}
+                    onClick={triggerNow}
+                    /* Also disabled once a cycle is already due, which is what a
+                       successful press produces. Before this the button
+                       re-enabled unchanged, so the press acknowledged itself
+                       only through the schedule line's wording -- a usability
+                       reader would not press it a second time because they
+                       could not tell whether that would double the nudge or do
+                       nothing (it does nothing: the cycle is already armed).
+                       The disabled state answers that without a new string; an
+                       edit made while due still has Save beside it. */
+                    disabled={saving || writeDisabled || cycleAlreadyDue || !message.trim()}
+                  >
+                    <Zap size={14} aria-hidden />
+                  </Btn>
+                  {/* A write (`active: false` and nothing else), so it follows
+                      Save's `writeDisabled` gate -- but not the empty-goal gate:
+                      a pause sends no fields. */}
+                  <Btn
+                    type="button"
+                    className="!px-1.5"
+                    aria-label={i18nT('components.autoNudgePopover.pause_loop')}
+                    title={i18nT('components.autoNudgePopover.pause_loop')}
+                    onClick={pause}
+                    disabled={saving || writeDisabled}
+                  >
+                    <Pause size={14} aria-hidden />
+                  </Btn>
+                  {/* Save as an icon, in the accent the text button wore: the
+                      plain persist of the fields, running loop only -- on an
+                      inactive loop Play does the saving on the way back. */}
+                  <Btn
+                    type="button"
+                    primary
+                    className="!px-1.5"
+                    aria-label={i18nT('components.autoNudgePopover.save')}
+                    title={i18nT('components.autoNudgePopover.save')}
+                    onClick={save}
+                    disabled={saving || writeDisabled || !message.trim()}
+                  >
+                    <SaveIcon size={14} aria-hidden />
+                  </Btn>
+                </>
+              ) : (
+                /* Play: the ONE control of every inactive state, in the accent
+                   Save wears while the loop runs -- it IS the primary action
+                   here. Paused or stopped: save the form, resume or revive,
+                   fire (`resumeNow`). No loop: create from the form, fire the
+                   new id (`startNow`) -- where today's "Start loop" text button
+                   stood and in its accent, so the first nudge goes out now
+                   rather than after `idle_secs`. Nothing else renders on an
+                   inactive loop: there is no separate Save because Play saves. */
+                <Btn
+                  type="button"
+                  primary
+                  className="!px-1.5"
+                  aria-label={pausedManually ? i18nT('components.autoNudgePopover.resume_loop') : i18nT('components.autoNudgePopover.start_loop')}
+                  title={pausedManually ? i18nT('components.autoNudgePopover.resume_loop') : i18nT('components.autoNudgePopover.start_loop')}
+                  onClick={loop ? resumeNow : startNow}
+                  disabled={saving || writeDisabled || !message.trim()}
+                >
+                  <Play size={14} aria-hidden />
+                </Btn>
+              )}
+            </div>
+          </div>
+        )}
       </PopoverContent>}
     </Popover>
   )
