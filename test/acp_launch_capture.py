@@ -236,48 +236,17 @@ def _stub_common(stack: list, rec: _Recorder, tmp_path: Path) -> None:
             # variable keeps the capture host-independent, which is the property the
             # fixed parent exists to give it.
             patch.object(config_paths, "_resolve_default_home", lambda: tmp_path / "default-home"),
-        ]
-    )
-    stack.extend(_stub_self_served())
-
-
-#: The synthetic answer for each harness that serves ACP from its own binary.
-_SELF_SERVED_ANSWERS = {
-    ACP_BACKEND_OPENCODE: (_OPENCODE_BIN, _SEARCH_PATH),
-    ACP_BACKEND_GOOSE: (_GOOSE_BIN, _SEARCH_PATH),
-    ACP_BACKEND_DEEPSEEK: (_DEEPSEEK_BIN, _SEARCH_PATH),
-}
-
-#: The per-harness resolver each of those harnesses has, and the cache global it
-#: publishes for the install probe's ``restart_required`` answer.
-_PER_HARNESS_RESOLVERS = {
-    ACP_BACKEND_OPENCODE: ("_resolve_opencode_bin", "_opencode_bin_cache"),
-    ACP_BACKEND_GOOSE: ("_resolve_goose_bin", "_goose_bin_cache"),
-    ACP_BACKEND_DEEPSEEK: ("_resolve_deepseek_bin", "_deepseek_bin_cache"),
-}
-
-
-def _stub_self_served() -> list:
-    """Patch the plain-binary resolvers, whichever shape this checkout has.
-
-    Resolved by NAME rather than hard-coded, because the shape is exactly what the
-    change this fixture exists to judge is allowed to move: one resolver taking a
-    backend id, or one function per harness. The capture must read the same on both
-    sides of that, or the fixture would be comparing two different measurements.
-    """
-    if hasattr(client_mod, "_resolve_self_served_bin"):
-        return [
             patch.object(
                 client_mod,
                 "_resolve_self_served_bin",
-                side_effect=lambda backend: _SELF_SERVED_ANSWERS[backend],
-            )
+                side_effect=lambda backend: {
+                    ACP_BACKEND_OPENCODE: (_OPENCODE_BIN, _SEARCH_PATH),
+                    ACP_BACKEND_GOOSE: (_GOOSE_BIN, _SEARCH_PATH),
+                    ACP_BACKEND_DEEPSEEK: (_DEEPSEEK_BIN, _SEARCH_PATH),
+                }[backend],
+            ),
         ]
-    return [
-        patch.object(client_mod, name, return_value=_SELF_SERVED_ANSWERS[backend])
-        for backend, (name, _cache) in _PER_HARNESS_RESOLVERS.items()
-        if hasattr(client_mod, name)
-    ]
+    )
 
 
 #: The module-level resolver caches a capture disturbs. Each is resolved once per
@@ -292,20 +261,6 @@ _ADAPTER_CACHE_NAMES = (
 )
 
 
-def _self_served_cache_names() -> tuple:
-    """The self-served cache globals this checkout publishes, if it has any.
-
-    A checkout that keys one mapping by backend has none of these; one with a
-    resolver per harness has one global each. Both are snapshotted and restored, for
-    the same reason the adapter caches are.
-    """
-    return tuple(
-        cache
-        for _backend, (_resolver, cache) in _PER_HARNESS_RESOLVERS.items()
-        if hasattr(client_mod, cache)
-    )
-
-
 def snapshot_bin_caches() -> dict[str, Any]:
     """The resolver caches as they stand, for :func:`restore_bin_caches`.
 
@@ -313,11 +268,7 @@ def snapshot_bin_caches() -> dict[str, Any]:
     object the spawn path mutates, so holding the reference would snapshot nothing.
     """
     saved: dict[str, Any] = {name: getattr(client_mod, name) for name in _ADAPTER_CACHE_NAMES}
-    for name in _self_served_cache_names():
-        saved[name] = getattr(client_mod, name)
-    mapping = getattr(client_mod, "_self_served_bin_caches", None)
-    if mapping is not None:
-        saved["_self_served_bin_caches"] = dict(mapping)
+    saved["_self_served_bin_caches"] = dict(client_mod._self_served_bin_caches)
     return saved
 
 
@@ -332,22 +283,16 @@ def restore_bin_caches(saved: dict[str, Any]) -> None:
     """
     for name in _ADAPTER_CACHE_NAMES:
         setattr(client_mod, name, saved[name])
-    for name in _self_served_cache_names():
-        setattr(client_mod, name, saved[name])
-    mapping = getattr(client_mod, "_self_served_bin_caches", None)
-    if mapping is not None:
-        mapping.clear()
-        mapping.update(saved["_self_served_bin_caches"])
+    client_mod._self_served_bin_caches.clear()
+    client_mod._self_served_bin_caches.update(saved["_self_served_bin_caches"])
 
 
 def _reset_bin_caches() -> None:
     """Drop the module-level resolver caches so each backend resolves afresh."""
     unresolved = client_mod._UNRESOLVED
-    for name in _ADAPTER_CACHE_NAMES + _self_served_cache_names():
+    for name in _ADAPTER_CACHE_NAMES:
         setattr(client_mod, name, unresolved)
-    mapping = getattr(client_mod, "_self_served_bin_caches", None)
-    if mapping is not None:
-        mapping.clear()
+    client_mod._self_served_bin_caches.clear()
 
 
 def capture(backend: str, tmp_path: Path) -> dict[str, Any]:
