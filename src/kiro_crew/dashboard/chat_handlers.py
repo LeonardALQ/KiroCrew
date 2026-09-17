@@ -978,10 +978,13 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             )
         )
         # Use Python-controlled stage loop instead of _run_chat
+        if slot._stage_delivery_pending is not None:
+            slot._last_turn_auth_required = False
         task = asyncio.create_task(
             _stage_loop(state, slot, auto_run=_is_auto),
             name=f"dashboard-stage:{slot.key}",
         )
+        slot.track_stage_controller(task)
         slot.task = task
         slot._recovery_retrigger_count = 0
         state._background_tasks.add(task)
@@ -4041,6 +4044,21 @@ def _app_cancel_denied(
     return _slot_not_found()
 
 
+async def _cancel_stage_controller(slot: "_ChatSlot") -> None:
+    """Cancel and boundedly join the outer Autopilot controller, if live."""
+    controller = getattr(slot, "_stage_controller_task", None)
+    if controller is None or controller is asyncio.current_task() or controller.done():
+        return
+    controller.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(controller, return_exceptions=True),
+            timeout=2.0,
+        )
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        pass
+
+
 async def stop_slot_turn(
     state: "DashboardState",
     slot: "_ChatSlot",
@@ -4152,6 +4170,7 @@ async def stop_slot_turn(
         # reports success and cancels nothing. The SEL record below stays on the
         # slot-derived key, which identifies the tab the operator pressed.
         await state.sessions.stop_turn(cancel_key, force=True, on_hard=_on_hard_force)
+        await _cancel_stage_controller(slot)
         sel().log_tool_invocation(
             session_key=_history_key_for(name),
             agent=getattr(slot, "agent", "") or "kirocrew",
@@ -4239,6 +4258,7 @@ async def stop_slot_turn(
         on_soft=_on_soft,
         on_hard=_on_hard,
     )
+    await _cancel_stage_controller(slot)
     # Resolve orphaned card when provider reports no active turn
     if outcome == "idle" and slot._stop_event_id:
         _resolve_stop_event(slot, "soft")
@@ -5433,10 +5453,19 @@ async def _close_slot(
     # was claimed), while a cancel landing mid-removal would interrupt
     # provider.shutdown() after the registry entry was already popped and
     # leak the process holding kiro-cli's native session lock.
-    if slot.running and slot.task is not None:
-        slot.task.cancel()
+    _teardown_tasks = {
+        task
+        for task in (slot.task, slot._stage_controller_task)
+        if task is not None and not task.done()
+    }
+    if _teardown_tasks:
+        for task in _teardown_tasks:
+            task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(slot.task), timeout=2.0)
+            await asyncio.wait_for(
+                asyncio.gather(*_teardown_tasks, return_exceptions=True),
+                timeout=2.0,
+            )
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
     # Post-pop teardown race: across the awaits above (and the app-notify awaits

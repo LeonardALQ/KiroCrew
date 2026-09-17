@@ -733,6 +733,7 @@ def _reset_auto_run_for_new_plan(slot: "_ChatSlot") -> None:
             except OSError:
                 pass
     slot._orch_tracker = None
+    slot._stage_delivery_pending = None
     slot._auto_run = False
     # A freshly armed plan starts un-cancelled. This is the ONLY clear site for
     # the latch — deliberately not Go (api_chat_plan_action): clearing on Go

@@ -2399,6 +2399,32 @@ class SubagentManager:
         """
         await asyncio.shield(task)
 
+    async def wait_for_parent_reports(self, parent_session_key: str) -> bool:
+        """Wait until this parent's registered terminal reports finish delivery.
+
+        Returns whether at least one matching report was observed.
+        ``running_agents_for`` stops returning an agent when its terminal report
+        begins, before that report reaches the parent conversation. Autopilot
+        stage boundaries need the later fact. Report tasks are registered in
+        ``_report_owners`` before they can mark their agent done, so snapshotting
+        that map closes the execution-to-delivery race without changing the
+        meaning of "running" for other callers.
+        """
+        observed = False
+        while True:
+            reports = tuple(
+                task
+                for task, owner in self._report_owners.items()
+                if owner.parent_session_key == parent_session_key and not task.done()
+            )
+            if not reports:
+                return observed
+            observed = True
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in reports),
+                return_exceptions=True,
+            )
+
     def _release_slot(self, info: SubagentInfo) -> bool:
         return self._terminal._release_slot_impl(info)
 

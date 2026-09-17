@@ -6763,6 +6763,15 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
     # carry one. Recovery rows are included because a completion that failed before
     # the model consumed it is re-queued verbatim under that kind.
     _consumed: list[bool] = [False]
+    _stage_delivery_entry = next(
+        (
+            dict(item)
+            for item in consumed
+            if slot._in_stage_execution
+            and item.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+        ),
+        None,
+    )
     _settleable = [
         item["content"]
         for item in consumed
@@ -6844,6 +6853,59 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
         _run_chat(state, slot, next_msg, **_run_kwargs),
     )
     slot.task = task
+    if _stage_delivery_entry is not None:
+
+        def _restore_failed_stage_delivery(done: "asyncio.Task[Any]") -> None:
+            if done.cancelled() or _consumed[0]:
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is None or state._slots.get(slot.key) is not slot:
+                return
+            content = str(_stage_delivery_entry.get("content", ""))
+            kind = str(_stage_delivery_entry.get("kind", ""))
+            if any(
+                entry.get("kind") == kind and entry.get("content") == content
+                for entry in slot._queue
+            ):
+                return
+            slot.queue_insert(
+                0,
+                content,
+                kind=kind,
+                payload=str(_stage_delivery_entry.get("payload", "")),
+                meta=(
+                    _stage_delivery_entry.get("meta")
+                    if isinstance(_stage_delivery_entry.get("meta"), dict)
+                    else None
+                ),
+                on_consumed=(
+                    _stage_delivery_entry.get("_on_consumed")
+                    if callable(_stage_delivery_entry.get("_on_consumed"))
+                    else None
+                ),
+                on_irreversibly_consumed=(
+                    _stage_delivery_entry.get("_on_irreversibly_consumed")
+                    if callable(_stage_delivery_entry.get("_on_irreversibly_consumed"))
+                    else None
+                ),
+                directive_user_origin=(_stage_delivery_entry.get("_directive_user_origin") is True),
+                directive_channel_origin=(
+                    _stage_delivery_entry.get("_directive_channel_origin") is True
+                ),
+            )
+            state.push_slots_update()
+
+        task.add_done_callback(_restore_failed_stage_delivery)
+    if is_recovery:
+        slot._synthetic_recovery_inflight += 1
+
+        def _release_stage_recovery(_task: "asyncio.Task[Any]") -> None:
+            slot._synthetic_recovery_inflight = max(0, slot._synthetic_recovery_inflight - 1)
+
+        task.add_done_callback(_release_stage_recovery)
     if _settleable:
         # Open the retention clock on the result files this row promises — but
         # only once the turn has actually run and the model has consumed the
@@ -7187,6 +7249,12 @@ async def _run_chat(
             _current_replay_message = None
 
     session_key = effective_session_key(slot)
+    if slot._in_stage_execution:
+        # A stage may be linked to another session while this turn runs. Its
+        # children and terminal reports stay under the key captured here, so the
+        # controller settles every captured key instead of re-deriving only the
+        # slot's newest binding after the turn.
+        slot._stage_parent_session_keys.add(session_key)
     sessions = getattr(state, "sessions", None)
 
     def _session_stop_generation() -> int:
@@ -14275,6 +14343,29 @@ async def _run_chat(
         # Every queued prompt would hit the same wall. Popping them one by one
         # would drain the whole queue into identical failures, leaving nothing to
         # resume after the user signs in — so hold the queue intact instead.
+        # The current system input was already popped before this turn began;
+        # restore it through the ordinary recovery helper so its delivery
+        # callbacks, provenance, and containment stamp survive post-login retry.
+        _auth_retry_kind = ""
+        if _synthetic_recovery_turn:
+            _auth_retry_kind = SYNTHETIC_RECOVERY_KIND
+        elif _current_message is not None and _current_message.get("role") == "subagent":
+            _auth_retry_kind = SUBAGENT_COMPLETION_KIND
+        if _auth_retry_kind and not any(
+            entry.get("kind") == _auth_retry_kind and entry.get("content") == message
+            for entry in slot._queue
+        ):
+            _current_meta = (
+                _current_message.get("meta")
+                if _current_message is not None and isinstance(_current_message.get("meta"), dict)
+                else None
+            )
+            _queue_recovery(
+                0,
+                message,
+                kind=_auth_retry_kind,
+                extra_meta=_current_meta,
+            )
         _auth_required = True
         needs_session_reset = True
         _persist_partial_reply()

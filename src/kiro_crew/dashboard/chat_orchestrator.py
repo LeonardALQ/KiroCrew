@@ -14,7 +14,12 @@ from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.config.sections import OrchestratorConfig
 from kiro_crew.context_management import MAX_STAGE_ROUNDS, OrchestrationTracker
 from kiro_crew.dashboard.chat_runner import _run_chat, _start_next_queued_turn
-from kiro_crew.dashboard.chat_utils import chat_done_payload
+from kiro_crew.dashboard.chat_utils import (
+    SUBAGENT_COMPLETION_KIND,
+    SYNTHETIC_RECOVERY_KIND,
+    chat_done_payload,
+    effective_session_key,
+)
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot, append_and_surface
 from kiro_crew.dashboard.turn_dispatch import _bounded_turn
 from kiro_crew.hooks import safe_read_file
@@ -350,8 +355,13 @@ async def _exit_cancelled_plan(state: "DashboardState", slot: "_ChatSlot") -> No
     # pending loop ran are caught too.
     if slot._queue:
         slot._queue[:] = [e for e in slot._queue if not _is_plan_approval_entry(e)]
+
+    def _turn_running() -> bool:
+        task = slot.task
+        return task is not None and not task.done()
+
     if (
-        not slot.running
+        not _turn_running()
         and not slot._last_turn_auth_required
         and state._slots.get(slot.key) is slot
         and slot._queue
@@ -359,7 +369,7 @@ async def _exit_cancelled_plan(state: "DashboardState", slot: "_ChatSlot") -> No
     ):
         state.push_slots_update()
         _next_started = await _start_next_queued_turn(state, slot)
-    if not _next_started and not slot.running:
+    if not _next_started and not _turn_running():
         slot.append("done", "", "done")
         state.broadcast_ws("chat_done", await chat_done_payload(state, slot))
         slot.task = None
@@ -428,6 +438,219 @@ async def _load_plan_budgets(slot: "_ChatSlot", tracker: OrchestrationTracker) -
     return True
 
 
+def _stage_parent_session_keys(slot: "_ChatSlot") -> tuple[str, ...]:
+    """Every immutable parent key captured by a turn in the pending stage."""
+    keys = tuple(sorted(slot._stage_parent_session_keys))
+    return keys or (effective_session_key(slot),)
+
+
+def _running_stage_agents(manager: object, slot: "_ChatSlot") -> list[dict] | None:
+    """Combine live agents across all parent keys used by the pending stage."""
+    pending: list[dict] = []
+    for parent_key in _stage_parent_session_keys(slot):
+        current = manager.running_agents_for(parent_key)  # type: ignore[attr-defined]
+        if current is None:
+            return None
+        pending.extend(current)
+    return pending
+
+
+async def _settle_stage_delivery(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    tracker: OrchestrationTracker,
+    stage_num: int,
+    *,
+    require_registered_slot: bool = False,
+) -> bool:
+    """Wait until parent agents, reports, and completion turns are stably quiescent."""
+    manager = state.subagents
+    if manager is None:
+        _halt_plan(
+            state,
+            slot,
+            f"⚠️ Stage {stage_num}: subagent manager unavailable. Auto-run stopped.",
+            event_type="auto_run_subagent_check_failed",
+            operation="subagent_manager_missing",
+            stage_num=stage_num,
+        )
+        return False
+
+    max_rounds = (
+        min(tracker.stage_timeout_seconds // 4, 450) if tracker.stage_timeout_seconds else 450
+    )
+    rounds = 0
+    clean_passes = 0
+    seen_parent_keys: frozenset[str] = frozenset()
+    own_task = asyncio.current_task()
+    last_delivery_entry: dict | None = None
+    wait_for_reports = getattr(type(manager), "wait_for_parent_reports", None)
+
+    def _delivery_failed() -> bool:
+        _halt_plan(
+            state,
+            slot,
+            f"⚠️ Stage {stage_num} finished its background work, but its "
+            "completion event could not be processed. Auto-run paused "
+            "before the next stage. Resolve the session error, then send "
+            "Go to resume.",
+            event_type="auto_run_stage_error",
+            operation="stage_completion_delivery_failed",
+            stage_num=stage_num,
+        )
+        return False
+
+    while not _orchestration_stopped(slot, tracker):
+        if require_registered_slot and state._slots.get(slot.key) is not slot:
+            return False
+        parent_keys = _stage_parent_session_keys(slot)
+        current_parent_keys = frozenset(parent_keys)
+        if current_parent_keys != seen_parent_keys:
+            seen_parent_keys = current_parent_keys
+            clean_passes = 0
+        if slot._last_turn_auth_required:
+            if last_delivery_entry is not None and not any(
+                entry.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+                for entry in slot._queue
+            ):
+                slot.queue_insert(
+                    0,
+                    str(last_delivery_entry.get("content", "")),
+                    kind=str(last_delivery_entry.get("kind", "")),
+                    payload=str(last_delivery_entry.get("payload", "")),
+                    meta=(
+                        last_delivery_entry.get("meta")
+                        if isinstance(last_delivery_entry.get("meta"), dict)
+                        else None
+                    ),
+                    on_consumed=(
+                        last_delivery_entry.get("_on_consumed")
+                        if callable(last_delivery_entry.get("_on_consumed"))
+                        else None
+                    ),
+                    on_irreversibly_consumed=(
+                        last_delivery_entry.get("_on_irreversibly_consumed")
+                        if callable(last_delivery_entry.get("_on_irreversibly_consumed"))
+                        else None
+                    ),
+                    directive_user_origin=(
+                        last_delivery_entry.get("_directive_user_origin") is True
+                    ),
+                    directive_channel_origin=(
+                        last_delivery_entry.get("_directive_channel_origin") is True
+                    ),
+                )
+                state.push_slots_update()
+            return _delivery_failed()
+
+        pending = _running_stage_agents(manager, slot)
+        if pending is None:
+            _halt_plan(
+                state,
+                slot,
+                f"⚠️ Stage {stage_num}: subagent check failed. Auto-run stopped.",
+                event_type="auto_run_subagent_check_failed",
+                operation="running_agents_for_none",
+                stage_num=stage_num,
+            )
+            return False
+        if pending:
+            clean_passes = 0
+            rounds += 1
+            if rounds >= max_rounds:
+                _halt_plan(
+                    state,
+                    slot,
+                    f"⚠️ Stage {stage_num}: subagent wait exhausted after "
+                    f"{(rounds * 2) // 60} minutes. Auto-run stopped — some "
+                    "results may be incomplete.",
+                    event_type="auto_run_subagent_timeout",
+                    operation="subagent_wait_exhausted",
+                    stage_num=stage_num,
+                )
+                return False
+            if rounds == 1 or rounds % 10 == 0:
+                state.broadcast_ws(
+                    "chat_status",
+                    {"slot": slot.key, "status": f"Waiting for {len(pending)} subagent(s)..."},
+                )
+            await asyncio.sleep(2)
+            continue
+
+        if callable(wait_for_reports):
+            try:
+                reports_observed = False
+                for parent_key in parent_keys:
+                    reports_observed = (
+                        bool(await manager.wait_for_parent_reports(parent_key)) or reports_observed
+                    )
+                if reports_observed:
+                    clean_passes = 0
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Stage %d: terminal-report handoff failed for slot %s",
+                    stage_num,
+                    slot.key,
+                )
+                return _delivery_failed()
+
+        delivery_task = slot.task
+        if delivery_task is not None and delivery_task is not own_task and not delivery_task.done():
+            clean_passes = 0
+            try:
+                await delivery_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Stage %d: completion turn failed for slot %s",
+                    stage_num,
+                    slot.key,
+                )
+                return _delivery_failed()
+            continue
+
+        delivery_entry = next(
+            (
+                entry
+                for entry in slot._queue
+                if entry.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+            ),
+            None,
+        )
+        if delivery_entry is not None:
+            clean_passes = 0
+            last_delivery_entry = dict(delivery_entry)
+            try:
+                if not await _start_next_queued_turn(state, slot):
+                    return _delivery_failed()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Stage %d: completion queue drain failed for slot %s",
+                    stage_num,
+                    slot.key,
+                )
+                return _delivery_failed()
+            continue
+
+        if slot._subagent_deliveries_inflight or slot._synthetic_recovery_inflight:
+            clean_passes = 0
+            await asyncio.sleep(0)
+            continue
+        if clean_passes == 0:
+            clean_passes = 1
+            await asyncio.sleep(0)
+            continue
+        return True
+
+    return False
+
+
 async def _stage_loop(
     state: "DashboardState",
     slot: "_ChatSlot",
@@ -438,6 +661,10 @@ async def _stage_loop(
     Iterates through plan stages, calling ``_run_chat`` once per stage.
     Stage boundaries are enforced by Python code, not LLM prompts.
     """
+    controller_managed = slot._stage_controller_task is asyncio.current_task()
+    # Direct internal callers use an unattached slot in focused tests and tools.
+    # Production entry points track the controller before the task can run, so
+    # only those managed loops require the slot to remain in the live registry.
     # Cancelled-plan latch: checked BEFORE the lazy tracker creation
     # below. A Cancel processed after the Go POST was accepted but before this
     # coroutine ran found no tracker to stop; without this check the loop would
@@ -514,8 +741,19 @@ async def _stage_loop(
     total = slot._plan_stage_count
     titles = getattr(slot, "_stage_titles", [])
 
-    # Determine starting stage (0-based index)
-    start_idx = tracker.current_stage if tracker._stage_rounds else 0
+    # Determine starting stage (0-based index). A stage with pending delivery
+    # already ran its LLM turn, so it resumes at that boundary instead of
+    # replaying the turn or advancing past an uncaptured result.
+    pending_stage = slot._stage_delivery_pending
+    if pending_stage is not None and not 1 <= pending_stage <= total:
+        pending_stage = None
+        slot._stage_delivery_pending = None
+    start_idx = (
+        pending_stage - 1
+        if pending_stage is not None
+        else tracker.current_stage if tracker._stage_rounds else 0
+    )
+    plan_had_work = start_idx < total
 
     logger.info(
         "Stage loop start: slot=%s total=%d start_idx=%d auto_run=%s titles=%s",
@@ -557,11 +795,55 @@ async def _stage_loop(
         # answers False, so a paused plan's later Go still pays for nothing.
         if tracker.budgets_unset and not await _load_plan_budgets(slot, tracker):
             return
+        if pending_stage is not None:
+            if not await _settle_stage_delivery(
+                state,
+                slot,
+                tracker,
+                pending_stage,
+                require_registered_slot=controller_managed,
+            ):
+                return
+            try:
+                raw_parts = _collect_stage_result_parts(slot)
+                result_path = await asyncio.to_thread(
+                    _write_stage_result,
+                    slot.key,
+                    pending_stage,
+                    raw_parts,
+                )
+                tracker.record_stage_result(pending_stage, result_path)
+            except OSError:
+                logger.warning(
+                    "Failed to capture stage %d result to disk",
+                    pending_stage,
+                    exc_info=True,
+                )
+            slot._stage_delivery_pending = None
+            start_idx = pending_stage
+            cap = _round_cap_message(tracker, pending_stage) if auto_run else None
+            if cap:
+                _halt_plan(
+                    state,
+                    slot,
+                    cap,
+                    event_type="auto_run_round_cap",
+                    operation="stage_round_cap",
+                    stage_num=pending_stage,
+                )
+                return
         for stage_idx in range(start_idx, total):
+            if controller_managed and state._slots.get(slot.key) is not slot:
+                logger.info(
+                    "Stage loop for slot %s stopped because the slot is no longer registered",
+                    slot.key,
+                )
+                break
             if _orchestration_stopped(slot, tracker):
                 break
 
             stage_num = stage_idx + 1  # 1-based for display
+            slot._stage_parent_session_keys.clear()
 
             # Defensive clamp: never build or execute a stage beyond the CURRENT
             # plan size. `total` is captured once at range() creation; if the
@@ -691,9 +973,7 @@ async def _stage_loop(
             # NOT flushed here: a stage turn is automatic (`auto-go`), and a held
             # note is owed to the next USER turn, so feeding it to a stage would
             # spend it on a turn nobody asked for. The loop-exit flush below is
-            # the delivery point -- it sits in this function's `finally`, where
-            # `slot.task` is this loop's own task, so it fires on the completed,
-            # paused and cancelled paths alike.
+            # the delivery point for the completed, paused and cancelled paths.
             slot.append("user", context, "msg msg-u auto-go")
             try:
                 # `_bounded_turn`, NOT `asyncio.wait_for`. `_run_chat` CATCHES
@@ -710,27 +990,37 @@ async def _stage_loop(
                 # in the tracker, so skip the ceiling entirely rather than
                 # passing 0, which would cut every stage instantly.
                 _turn_timeout = tracker.stage_timeout_seconds
+                slot._stage_parent_session_keys.add(effective_session_key(slot))
+                _stage_turn_coro = _run_chat(
+                    state,
+                    slot,
+                    context,
+                    _directive_user_origin=False,
+                    # Stage context assembled by the orchestrator, so the
+                    # ledger records the gateway rather than a user.
+                    _turn_actor="gateway",
+                )
                 if _turn_timeout:
-                    await _bounded_turn(
-                        _run_chat(
-                            state,
-                            slot,
-                            context,
-                            _directive_user_origin=False,
-                            # Stage context assembled by the orchestrator, so the
-                            # ledger records the gateway rather than a user.
-                            _turn_actor="gateway",
-                        ),
-                        _turn_timeout,
-                    )
-                else:
-                    await _run_chat(
-                        state,
-                        slot,
-                        context,
-                        _directive_user_origin=False,
-                        _turn_actor="gateway",
-                    )
+                    _stage_turn_coro = _bounded_turn(_stage_turn_coro, _turn_timeout)
+                # ``slot.task`` must name the ACTIVE LLM turn, not this outer
+                # stage controller. A subagent terminal report waits for that
+                # task before injecting its completion. Pointing it at the
+                # controller made the report wait for every remaining stage,
+                # while the controller saw no running agents and advanced before
+                # the report reached the conversation.
+                _stage_turn_task = asyncio.create_task(
+                    _stage_turn_coro,
+                    name=f"dashboard-stage-turn:{slot.key}:{stage_num}",
+                )
+                slot.task = _stage_turn_task
+                try:
+                    await _stage_turn_task
+                finally:
+                    # A completion report may already have claimed the slot with
+                    # its own turn after this one ended. Never clear that newer
+                    # claim.
+                    if slot.task is _stage_turn_task:
+                        slot.task = None
             except (asyncio.TimeoutError, TimeoutError):
                 # `_bounded_turn` raises builtin TimeoutError; on 3.10
                 # asyncio.TimeoutError is a DIFFERENT class, so catch both (the
@@ -796,6 +1086,8 @@ async def _stage_loop(
             if _orchestration_stopped(slot, tracker):
                 break
 
+            slot._stage_delivery_pending = stage_num
+
             # Wait for pending subagents spawned during this stage
             _sa_rounds = 0
             # Dynamic poll cap. Each poll sleeps 2s, so `stage_timeout // 4`
@@ -811,7 +1103,7 @@ async def _stage_loop(
                 _sa_max_rounds = min(tracker.stage_timeout_seconds // 4, 450)
             else:
                 _sa_max_rounds = 450
-            session_key = f"dashboard:{slot.key}"
+            _stage_had_subagents = False
             if state.subagents is None:
                 # Fail-closed: subagent manager missing — stop auto-run
                 logger.warning(
@@ -844,7 +1136,8 @@ async def _stage_loop(
                 )
                 break
             else:
-                _pending = state.subagents.running_agents_for(session_key)
+                _pending = _running_stage_agents(state.subagents, slot)
+                _stage_had_subagents = bool(_pending)
                 # Fail-closed: if running_agents_for returns None (error),
                 # stop auto-run rather than silently skipping verification
                 if _pending is None:
@@ -887,7 +1180,7 @@ async def _stage_loop(
                 ):
                     _sa_rounds += 1
                     await asyncio.sleep(2)
-                    _pending = state.subagents.running_agents_for(session_key)
+                    _pending = _running_stage_agents(state.subagents, slot)
                     # Update status every 10 polls (~20s)
                     if _pending and _sa_rounds % 10 == 0:
                         state.broadcast_ws(
@@ -970,6 +1263,164 @@ async def _stage_loop(
             if _orchestration_stopped(slot, tracker):
                 break
 
+            # Execution completion and parent delivery are separate events.
+            # A terminal report marks its agent done before its _on_done callback
+            # injects the completion into this conversation, so
+            # running_agents_for() can become empty while the report is still in
+            # flight. Wait for the manager's registered report tasks, then drain
+            # and await every system turn they launched or queued. Only then is
+            # this stage complete and safe to capture or advance past.
+            _delivery_ok = True
+            _had_parent_reports = False
+            _wait_for_reports = getattr(type(state.subagents), "wait_for_parent_reports", None)
+            if callable(_wait_for_reports):
+                try:
+                    for parent_key in _stage_parent_session_keys(slot):
+                        _had_parent_reports = (
+                            bool(await state.subagents.wait_for_parent_reports(parent_key))
+                            or _had_parent_reports
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Stage %d: terminal-report handoff failed for slot %s",
+                        stage_num,
+                        slot.key,
+                    )
+                    _delivery_ok = False
+
+            _completion_still_queued = any(
+                entry.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+                for entry in slot._queue
+            )
+            _delivery_needed = bool(
+                _stage_had_subagents
+                or _had_parent_reports
+                or slot._subagent_deliveries_inflight
+                or slot._synthetic_recovery_inflight
+                or _completion_still_queued
+            )
+            _own_task = asyncio.current_task()
+            _last_delivery_entry: dict | None = None
+            while _delivery_ok and _delivery_needed:
+                if slot._last_turn_auth_required:
+                    _delivery_ok = False
+                    break
+                _delivery_task = slot.task
+                if (
+                    _delivery_task is not None
+                    and _delivery_task is not _own_task
+                    and not _delivery_task.done()
+                ):
+                    try:
+                        await _delivery_task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "Stage %d: completion turn failed for slot %s",
+                            stage_num,
+                            slot.key,
+                        )
+                        _delivery_ok = False
+                    continue
+                _delivery_entry = next(
+                    (
+                        entry
+                        for entry in slot._queue
+                        if entry.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+                    ),
+                    None,
+                )
+                if _delivery_entry is None:
+                    break
+                _last_delivery_entry = dict(_delivery_entry)
+                try:
+                    _delivery_started = await _start_next_queued_turn(state, slot)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Stage %d: completion queue drain failed for slot %s",
+                        stage_num,
+                        slot.key,
+                    )
+                    _delivery_ok = False
+                    break
+                if not _delivery_started:
+                    break
+
+            if (
+                slot._last_turn_auth_required
+                and _last_delivery_entry is not None
+                and not any(
+                    entry.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+                    for entry in slot._queue
+                )
+            ):
+                slot.queue_insert(
+                    0,
+                    str(_last_delivery_entry.get("content", "")),
+                    kind=str(_last_delivery_entry.get("kind", "")),
+                    payload=str(_last_delivery_entry.get("payload", "")),
+                    meta=(
+                        _last_delivery_entry.get("meta")
+                        if isinstance(_last_delivery_entry.get("meta"), dict)
+                        else None
+                    ),
+                    on_consumed=(
+                        _last_delivery_entry.get("_on_consumed")
+                        if callable(_last_delivery_entry.get("_on_consumed"))
+                        else None
+                    ),
+                    on_irreversibly_consumed=(
+                        _last_delivery_entry.get("_on_irreversibly_consumed")
+                        if callable(_last_delivery_entry.get("_on_irreversibly_consumed"))
+                        else None
+                    ),
+                    directive_user_origin=(
+                        _last_delivery_entry.get("_directive_user_origin") is True
+                    ),
+                    directive_channel_origin=(
+                        _last_delivery_entry.get("_directive_channel_origin") is True
+                    ),
+                )
+                state.push_slots_update()
+
+            # A signed-out completion turn keeps its synthetic row queued for a
+            # later authenticated retry. Advancing now would recreate the silent
+            # gap this handoff closes, so stop with a visible reason instead.
+            _completion_still_queued = any(
+                entry.get("kind") in (SUBAGENT_COMPLETION_KIND, SYNTHETIC_RECOVERY_KIND)
+                for entry in slot._queue
+            )
+            if not _delivery_ok or slot._last_turn_auth_required or _completion_still_queued:
+                _halt_plan(
+                    state,
+                    slot,
+                    f"⚠️ Stage {stage_num} finished its background work, but its "
+                    "completion event could not be processed. Auto-run paused "
+                    "before the next stage. Resolve the session error, then send "
+                    "Go to resume.",
+                    event_type="auto_run_stage_error",
+                    operation="stage_completion_delivery_failed",
+                    stage_num=stage_num,
+                )
+                break
+
+            if not await _settle_stage_delivery(
+                state,
+                slot,
+                tracker,
+                stage_num,
+                require_registered_slot=controller_managed,
+            ):
+                break
+
+            if _orchestration_stopped(slot, tracker):
+                break
+
             # Capture result to disk, split in two: the message walk stays on
             # the loop (it reads live slot state), and the mkdir + write go to a
             # worker. This was one synchronous call on the loop.
@@ -983,6 +1434,7 @@ async def _stage_loop(
                 logger.warning(
                     "Failed to capture stage %d result to disk", stage_num, exc_info=True
                 )
+            slot._stage_delivery_pending = None
 
             # Re-check the round cap AFTER the stage's subagent wave: those
             # completions are what push a dashboard stage to its round limit, and
@@ -1030,7 +1482,7 @@ async def _stage_loop(
                     return  # User's next "Go" click will re-enter _stage_loop
         else:
             # for loop completed without break — all stages done
-            if not slot._stopping and start_idx < total:
+            if not slot._stopping and plan_had_work:
                 slot._auto_run = False
                 # Snapshot the result paths on the loop thread — `_stage_results`
                 # is live orchestration state the loop mutates — then read the
@@ -1084,6 +1536,8 @@ async def _stage_loop(
         # (pause / completion / break / error). This spans any queued recovery
         # turns a stage started, and lets a later Cancel + re-plan arm again.
         slot._in_stage_execution = False
+        if slot._stage_delivery_pending is None:
+            slot._stage_parent_session_keys.clear()
         logger.info(
             "Stage loop end: slot=%s current_stage=%s/%s stopping=%s auto_run=%s",
             slot.key,
@@ -1101,21 +1555,19 @@ async def _stage_loop(
         # a slot that is no longer registered. ``not slot._last_turn_auth_required``
         # mirrors _run_chat's own guard: a signed-out CLI holds the queue for
         # post-login resume instead of popping it into another auth failure.
-        # ``not slot.running`` defers entirely to a turn a stage's _run_chat may
-        # have already started (e.g. a refusal-recovery continuation): that live
-        # task owns slot.task and will drain the queue + emit chat_done itself, so
-        # we must not start a second turn or clobber/idle-close over it.
-        # `slot.running` is asking whether a turn a stage STARTED is still
-        # holding the slot: `_run_chat` publishes its own task on `slot.task`
-        # and clears it when the turn ends, and this loop must defer to one that
-        # is still live. It is not asking about this loop -- yet when no stage
-        # turn ever ran, `slot.task` is still this very task, which is alive by
-        # definition here, so the raw read reports a turn that does not exist.
-        # That silently skipped BOTH the handoff and the idle close on exactly
-        # the paths with nothing else to perform them: an abandoned bootstrap,
-        # and a plan with no stages.
+        # The public ``slot.running`` includes this outer controller so Stop and
+        # plan-action arbitration stay busy between stages. Final handoff needs
+        # the narrower child-turn question: only another live ``slot.task`` owns
+        # queue draining and ``chat_done``.
         _own_task = asyncio.current_task()
-        _turn_live = slot.running and slot.task is not _own_task
+
+        def _child_turn_live() -> bool:
+            turn_owner = slot.task
+            return bool(
+                turn_owner is not None and turn_owner is not _own_task and not turn_owner.done()
+            )
+
+        _turn_live = _child_turn_live()
         _next_started = False
         # Before _start_next_queued_turn, not after: a held note's context half
         # drains into that successor, so flushing later would let the note shape
@@ -1140,6 +1592,17 @@ async def _stage_loop(
                     slot.key,
                     exc_info=True,
                 )
+        # Build the terminal payload before the final queue decision. This is the
+        # controller's last await; a message accepted while it suspends sees the
+        # controller as running and enters the queue, then the arbitration below
+        # starts it before the controller releases ownership.
+        done_payload: dict | None = None
+        if not _turn_live:
+            done_payload = await chat_done_payload(state, slot)
+            if _paused:
+                done_payload["needs_input"] = True
+            _turn_live = _child_turn_live()
+
         # Same revoked-approval filter as _exit_cancelled_plan, at this drain:
         # a Go queued WHILE the plan ran, followed by a mid-loop cancel, would
         # otherwise drain an approval entry into _run_chat here — the
@@ -1160,9 +1623,7 @@ async def _stage_loop(
         if not _next_started and not _turn_live:
             if not _paused:
                 slot.append("done", "", "done")
-            done_payload = await chat_done_payload(state, slot)
-            if _paused:
-                done_payload["needs_input"] = True
+            assert done_payload is not None
             state.broadcast_ws("chat_done", done_payload)
             # Clean up task so the slot is available for the next "Go" click
             # (paused) or new messages (completed).
@@ -1292,10 +1753,13 @@ async def api_chat_plan_action(request: web.Request) -> web.Response:
                 resources=f"slot={slot.key}",
             )
         )
+    if slot._stage_delivery_pending is not None:
+        slot._last_turn_auth_required = False
     task = asyncio.create_task(
         _stage_loop(state, slot, auto_run=is_auto),
         name=f"dashboard-stage:{slot.key}",
     )
+    slot.track_stage_controller(task)
     slot.task = task
     slot._recovery_retrigger_count = 0
     state._background_tasks.add(task)

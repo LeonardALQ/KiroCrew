@@ -2104,6 +2104,10 @@ class _ChatSlot:
         "_plan_cancelled",
         "_auto_run",
         "_in_stage_execution",
+        "_stage_controller_task",
+        "_stage_delivery_pending",
+        "_stage_parent_session_keys",
+        "_synthetic_recovery_inflight",
         "_last_turn_auth_required",
         "_recovery_chat_triggered",
         "_stage_titles",
@@ -2504,6 +2508,23 @@ class _ChatSlot:
         # still drain) until the plan ends — so autopilot reuses the normal-chat
         # queue/chip path without changing slot.task / slot.running semantics.
         self._in_stage_execution: bool = False
+        # Outer Python stage driver, kept separately while ``task`` names the
+        # active LLM turn so slot teardown can cancel both lifetimes.
+        self._stage_controller_task: asyncio.Task[Any] | None = None
+        # Stage whose LLM turn finished but whose completion delivery and result
+        # capture have not committed. A later Go resumes this boundary in place.
+        self._stage_delivery_pending: int | None = None
+        # Every session key a turn in the current stage captured. A slot can be
+        # linked while a stage runs, but children and terminal reports remain
+        # owned by the immutable key each turn started with. Keep all of them
+        # until the pending stage is captured so boundary settlement cannot move
+        # away from work that was already accepted.
+        self._stage_parent_session_keys: set[str] = set()
+        # Number of synthetic recovery turns currently running inside a stage.
+        # A recovery is a continuation of that stage, so the controller must not
+        # capture or advance until the count returns to zero. Ordinary deferred
+        # turns stay outside this counter and keep their existing exit semantics.
+        self._synthetic_recovery_inflight: int = 0
         # Set by _run_chat's teardown to that turn's ACP auth-required outcome, so
         # the orchestrator _stage_loop can mirror the "hold the queue for
         # post-login resume" guard on its end-of-plan handoff (a signed-out CLI
@@ -3561,6 +3582,16 @@ class _ChatSlot:
     def queue_promote_by_id(self, queue_id: str) -> bool:
         return self._queue_repository.queue_promote_by_id(self, queue_id)
 
+    def track_stage_controller(self, task: asyncio.Task[Any]) -> None:
+        """Keep the outer stage driver reachable while ``task`` names a child turn."""
+        self._stage_controller_task = task
+
+        def _clear(done: asyncio.Task[Any]) -> None:
+            if self._stage_controller_task is done:
+                self._stage_controller_task = None
+
+        task.add_done_callback(_clear)
+
     @property
     def task(self) -> asyncio.Task[Any] | None:
         return self._task
@@ -3573,7 +3604,12 @@ class _ChatSlot:
 
     @property
     def running(self) -> bool:
-        return self.task is not None and not self.task.done()
+        task = self.task
+        controller = self._stage_controller_task
+        return bool(
+            (task is not None and not task.done())
+            or (controller is not None and not controller.done())
+        )
 
     @property
     def queue_depth(self) -> int:
