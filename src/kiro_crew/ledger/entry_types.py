@@ -172,6 +172,32 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
                 required=True,
                 note="True when this claim re-attached to an existing ledger.",
             ),
+            Field(
+                "parent",
+                JSON_OBJECT,
+                fields=(
+                    Field(
+                        "slot",
+                        JSON_STRING,
+                        required=True,
+                        note="The creating session's key, as session_create attributed it.",
+                    ),
+                    Field(
+                        "sid",
+                        JSON_STRING,
+                        note=(
+                            "The creator's ACP session id at this claim -- the unit whose "
+                            "ledger was live. Absent when the creator had no live handle."
+                        ),
+                    ),
+                ),
+                note=(
+                    "The session that made this one through session_create. Recorded "
+                    "on the CHILD, because the child knows its creator at its first turn "
+                    "while the creator never learns the child's session id. Absent on a "
+                    "person's own tab, on a fork, and on a spawn_run subagent."
+                ),
+            ),
         ),
     ),
     EntryType(

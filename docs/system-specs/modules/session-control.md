@@ -77,7 +77,11 @@ Creation copies two different kinds of state, and the split is deliberate.
 boundary; a child left in `default` would be both a boundary crossing and
 unaddressable by its own creator), inherits the caller's agent when none is
 named, takes that workspace's project directory as its cwd, and is attributed to
-the caller via `created_by` so the per-creator slot ceiling is countable.
+the caller via `created_by` so the per-creator slot ceiling is countable. The
+caller's ACP session id is also frozen onto the child at this mint
+(`_created_by_sid`), from the live caller handle, so the child's `session/opened`
+lineage cites the creator that was live when it was made rather than a
+replacement that may take the creator's slot before the child's first turn.
 
 **Approval posture** — the caller's `_trust` and `_trust_reads` transfer, so a
 trusted operator's dispatched worker does not stall on a prompt nobody is
@@ -211,6 +215,12 @@ A grandchild carries its parent's key there and is fenced by the same test, and 
 chain whose middle slot has been closed cannot fail open because no chain is
 walked. A person's own tab and a fork reach `get_or_create_slot` directly and stay
 unattributed, so ordinary human use is unaffected.
+
+The same attribution is the one lineage fact the child's append-only session ledger
+records: its `session/opened` carries `parent {slot, sid?}` -- `_created_by` as the
+slot, and `_created_by_sid`, the creator's ACP session id frozen at mint from the
+live caller handle (see `session-ledger-emitter.md`). The fence above reads the slot; a fold
+that builds the tree of sessions reads the ledger.
 
 There is deliberately NO attendance exemption. `_ChatSlot._human_seen` looks like
 the right hatch and is not: it records that a human has EVER driven the slot, is

@@ -169,7 +169,7 @@ The **Emitter** column says what exists in this commit. `yes` means the gateway 
 ### Session, turn
 | Type | `data` | Emitter |
 |---|---|---|
-| `session/opened` | header echo + `resumed` | yes |
+| `session/opened` | header echo + `resumed`; `parent {slot, sid?}` on a session another session made through `session_create` | yes |
 | `session/seeded` | `{source, count}` — history imported from a legacy transcript | — |
 | `session/closed` | `{reason}` | yes |
 | `turn/started` | `{turn, actor, depth, message_seq?, attempt?}` | yes |
@@ -263,6 +263,14 @@ session's behalf, whether a person asked for it or not, is a fact in that sessio
 what caused it. A subagent is itself a session with its own ledger, whose header `thread` points at
 the parent's `subagent/spawned` entry while that entry carries a `ref` into the child's log — the
 same pair as a crew dispatch, one level down.
+
+The edge that IS written today is the `session_create` one, and it takes the child's side of that
+pair only: a created session's `session/opened` carries `parent {slot, sid?}` -- the creator's slot
+key, and the creator's ACP session id when its handle was live at the child's first turn. It is
+recorded on the child because the child is the side that knows it: `_created_by` is stamped on the
+slot at mint, before any turn, while the creator never learns the child's id. `sid` is a citation of
+the creator's unit that was live, not the tree key -- a slot outlives its ACP session, so a fold that
+builds the session tree keys it by `slot` and reads one `session/opened` per ledger.
 
 ## 6. Rules
 

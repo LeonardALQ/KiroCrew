@@ -2273,6 +2273,8 @@ def on_session_opened(
     cwd: str = "",
     owner: str = "default",
     resumed: bool = False,
+    parent_slot: str = "",
+    parent_sid: str = "",
 ) -> None:
     """Create the ledger if this session has none, then echo its header.
 
@@ -2287,6 +2289,16 @@ def on_session_opened(
     appends, so an agent or model switch that kept the conversation continues
     one log rather than starting a second one. ``model`` is not a header field
     in the storage schema, so it is carried on this entry instead.
+
+    ``parent_slot`` names the session that made this one through
+    ``session_create`` (the slot's ``_created_by``), and ``parent_sid`` the
+    creator's ACP session id at this claim -- the unit whose ledger was live when
+    the child first ran. The edge is written on the CHILD because that is the
+    side that knows it: the creator is stamped on the slot at mint, before any
+    turn, while the creator never learns the child's session id, which is
+    assigned at the child's first turn. Both empty means nobody created this
+    session (a person's own tab, a fork) and no ``parent`` is written at all,
+    so a fold can tell "no creator" from "creator unknown".
     """
     if not session_id or not enabled():
         return
@@ -2366,18 +2378,23 @@ def on_session_opened(
         _remember(session_id, ledger)
         if not announce.setdefault("owed", created or bool(resumed)):
             return
-        ledger.append(
-            "session/opened",
-            {
-                "agent": agent or _DEFAULT_AGENT,
-                "slot": slot,
-                "model": model,
-                "cwd": cwd,
-                "owner": owner or "default",
-                "resumed": bool(resumed),
-            },
-            src=_SRC_GATEWAY,
-        )
+        data: dict[str, Any] = {
+            "agent": agent or _DEFAULT_AGENT,
+            "slot": slot,
+            "model": model,
+            "cwd": cwd,
+            "owner": owner or "default",
+            "resumed": bool(resumed),
+        }
+        if parent_slot:
+            # Written only when there IS a creator, and ``sid`` only when the
+            # creator still had a live handle: an empty string in either place
+            # would read as a creator with an empty name.
+            parent: dict[str, str] = {"slot": parent_slot}
+            if parent_sid:
+                parent["sid"] = parent_sid
+            data["parent"] = parent
+        ledger.append("session/opened", data, src=_SRC_GATEWAY)
 
     def _flag_creation_failed() -> None:
         # The creating record died with no ledger file behind it: no later append

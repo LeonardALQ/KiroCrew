@@ -1212,6 +1212,18 @@ async def create_session(
         # unattributed, so ordinary human use never consumes an automated caller's
         # share.
         slot._created_by = caller_key
+        # Freeze the creator's ACP session id HERE, at mint, from the live caller
+        # handle we just authorized -- not later at the child's first turn. The
+        # creator slot can be closed and replaced between this mint and that turn,
+        # and a replacement is a distinct handle with its own session id; reading
+        # the id live at emit would then cite the replacement's ledger and corrupt
+        # the child's immutable `session/opened` lineage with no recovery path.
+        # `live_caller` is the same object the authorization gate above resolved,
+        # so this is the id that was live when the child was made. Empty when the
+        # caller's handle has no ACP session yet, which is recorded as absent.
+        from kiro_crew import session_ledger_emit as _sle
+
+        slot._created_by_sid = _sle.session_id_of(getattr(live_caller, "_acp_client", None))
         # The creator's interactive auto-approve grant follows the work it is
         # handing off. Without this a trusted operator dispatches a worker that
         # then blocks on an approval prompt nobody is watching -- the same failure
