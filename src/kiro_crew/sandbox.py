@@ -4833,6 +4833,15 @@ def _private_memory_scan_failure(
     )
 
 
+def _private_memory_entry_vanished(exc: OSError) -> bool:
+    """A listed entry that disappeared before it could be examined.
+
+    Only the two codes the OS raises for a removed name or a removed parent
+    qualify; every other failure keeps the scan fail-closed.
+    """
+    return exc.errno in (errno.ENOENT, errno.ENOTDIR)
+
+
 def _validate_private_memory_hardlinks(layout: _PrivateMemoryLayout | None = None) -> None:
     """A path mask cannot hide another name for the same protected inode."""
     remaining = 100_000
@@ -4884,6 +4893,10 @@ def _validate_private_memory_hardlinks(layout: _PrivateMemoryLayout | None = Non
         try:
             info = path.stat()
         except OSError as exc:
+            if _private_memory_entry_vanished(exc):
+                # Listed a moment ago, gone now: a concurrent writer published
+                # or removed it. Nothing remains to alias a protected inode.
+                continue
             raise _private_memory_scan_failure("entry_stat", tree, exc) from exc
         inode = (info.st_dev, info.st_ino)
         if inode in visited:
@@ -4898,6 +4911,8 @@ def _validate_private_memory_hardlinks(layout: _PrivateMemoryLayout | None = Non
             try:
                 pending.extend((entry, tree) for entry in path.iterdir())
             except OSError as exc:
+                if _private_memory_entry_vanished(exc):
+                    continue
                 raise _private_memory_scan_failure("entry_iterdir", tree, exc) from exc
 
 

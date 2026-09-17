@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -37,7 +38,8 @@ def assert_diagnostic(error, operation, tree, code, *, winerror=None):
 
 
 @pytest.mark.parametrize("tree", ["root_tmp", "sessions", "snapshots", "memory"])
-def test_actual_map_publication_race_retains_operation_and_errno(scan_home, monkeypatch, tree):
+def test_actual_map_publication_race_is_tolerated_in_every_tree(scan_home, monkeypatch, tree):
+    """A staged file the writer publishes mid-scan is gone, not a failure."""
     root, layout = scan_home
     mapping = session_map.SessionMap()
     if tree != "root_tmp":
@@ -76,25 +78,103 @@ def test_actual_map_publication_race_retains_operation_and_errno(scan_home, monk
     thread.start()
     try:
         assert staged.wait(5), "writer did not stage"
-        with pytest.raises(RuntimeError, match=PREFIX) as caught:
-            sandbox._prepare_private_log_dir(layout)
+        log_dir = sandbox._prepare_private_log_dir(layout)
     finally:
         publish.set()
         thread.join(5)
     assert not thread.is_alive()
     assert not failures
+    assert temporary, "scanner never reached the staged file"
+    assert not temporary[0].exists()  # the OS really removed the name mid-scan
     assert mapping._written_seq == 1
     assert mapping._path.read_text(encoding="utf-8") == '{"fixture":true}'
-    error = caught.value
-    assert isinstance(error.__cause__, FileNotFoundError)
-    assert error.__cause__.errno == errno.ENOENT
-    assert error.__cause__.filename == str(temporary[0])
-    assert_diagnostic(
-        error, "entry_stat", tree, errno.ENOENT, winerror=getattr(error.__cause__, "winerror", None)
-    )
+    assert Path(log_dir).is_dir()
+    assert Path(log_dir).parent == root / "memory_stores" / ".execution-logs"
+
+
+@pytest.mark.parametrize("tree", ["sessions", "snapshots", "memory"])
+def test_directory_removed_between_stat_and_listing_is_tolerated(scan_home, monkeypatch, tree):
+    """A listed directory that vanishes before its own listing is gone, not a failure."""
+    root, layout = scan_home
+    parent = root / tree if tree != "memory" else root / "memory"
+    doomed = parent / PRIVATE
+    doomed.mkdir(parents=True)
+    (doomed / "transcript.jsonl").write_text(PRIVATE, encoding="utf-8")
+    original_iterdir = Path.iterdir
+    removed = []
+
+    def scan_iterdir(path):
+        if path == doomed:
+            # A real rmtree between the scanner's stat() and iterdir(): the OS
+            # raises the ENOENT, nothing is fabricated.
+            shutil.rmtree(path)
+            removed.append(path)
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", scan_iterdir)
+    log_dir = sandbox._prepare_private_log_dir(layout)
+    assert removed == [doomed]
+    assert not doomed.exists()
+    assert Path(log_dir).is_dir()
+
+
+@pytest.mark.parametrize("tree", ["root_tmp", "sessions", "snapshots", "memory"])
+def test_vanished_parent_at_entry_stat_is_tolerated(scan_home, monkeypatch, tree):
+    """ENOTDIR at entry_stat is the parent vanishing; it is the same race."""
+    root, layout = scan_home
+    if tree == "root_tmp":
+        entry = root / f"{PRIVATE}.tmp"
+    else:
+        entry = root / tree / PRIVATE
+        entry.parent.mkdir()
+    entry.write_text(PRIVATE, encoding="utf-8")
+    original_stat = Path.stat
+
+    def scan_stat(path, *args, **kwargs):
+        if path == entry:
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", scan_stat)
+    assert Path(sandbox._prepare_private_log_dir(layout)).is_dir()
+
+
+@pytest.mark.parametrize("tree", ["root_tmp", "sessions", "snapshots", "memory"])
+@pytest.mark.parametrize(
+    ("code", "error_type"),
+    [(errno.EACCES, PermissionError), (errno.EIO, OSError), (errno.ELOOP, OSError)],
+)
+def test_other_entry_stat_failures_still_refuse(scan_home, monkeypatch, tree, code, error_type):
+    """Only a vanished entry is skipped; every other stat failure stays fail-closed."""
+    root, layout = scan_home
+    if tree == "root_tmp":
+        entry = root / f"{PRIVATE}.tmp"
+    else:
+        entry = root / tree / PRIVATE
+        entry.parent.mkdir()
+    entry.write_text(PRIVATE, encoding="utf-8")
+    original_stat = Path.stat
+
+    def scan_stat(path, *args, **kwargs):
+        if path == entry:
+            raise error_type(code, os.strerror(code), str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", scan_stat)
+    with pytest.raises(RuntimeError, match=PREFIX) as caught:
+        sandbox._prepare_private_log_dir(layout)
+    assert isinstance(caught.value.__cause__, error_type)
+    assert_diagnostic(caught.value, "entry_stat", tree, code)
     assert not (root / "memory_stores" / ".execution-logs").exists()
-    # Publication settled: the same layout still admits healthy files.
-    sandbox._validate_private_memory_hardlinks(layout)
+
+
+def test_vanished_entry_predicate_names_exactly_two_codes():
+    """The skip is keyed on errno alone, never on a tree or a path."""
+    assert sandbox._private_memory_entry_vanished(FileNotFoundError(errno.ENOENT, "gone"))
+    assert sandbox._private_memory_entry_vanished(NotADirectoryError(errno.ENOTDIR, "gone"))
+    for code in (errno.EACCES, errno.EPERM, errno.EIO, errno.ELOOP, errno.ENAMETOOLONG):
+        assert not sandbox._private_memory_entry_vanished(OSError(code, os.strerror(code)))
+    assert not sandbox._private_memory_entry_vanished(OSError("no errno at all"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode enforcement")
