@@ -105,6 +105,8 @@ Timeout or recovery failure returns `503 store_unavailable` before allocating a
 slot or publishing identity. The shared recovery task survives request cancellation.
 An explicit switch holds its slot and session locks through cleanup, restores its
 slot fields, and drains protected selection and history rollback as one sequence.
+If the first private-memory grant for an empty owner chat fails after selection
+publication, the same rollback restores all three records before releasing the locks.
 Repeated cancellation during publication or rebound/error cleanup cannot skip
 history restoration or leave a rollback writer running after the handler exits.
 The transcript agent write must succeed before an explicit switch publishes its

@@ -6987,22 +6987,12 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
             pin_key = session_key
 
             async def _unwind_pin_failure() -> None:
-                # The error tells the caller nothing changed, so slot state and
-                # transcript metadata must agree. Restore slot.agent rather than
-                # prior_agent to preserve a concurrent writer's binding.
-                _rollback_switch()
-                if state.conversation_log:
-                    try:
-                        await asyncio.to_thread(
-                            state.conversation_log.update_metadata,
-                            _history_key_for(name),
-                            {"agent": str(slot.agent)},
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to restore agent metadata for slot %s", name, exc_info=True
-                        )
-                state.push_slots_update()
+                # A failed grant must restore the protected selection as well
+                # as the slot and transcript, before either switch lock releases.
+                try:
+                    await _rollback_owner_selection()
+                finally:
+                    state.push_slots_update()
 
             if (
                 state._slots.get(slot.key) is slot

@@ -1696,3 +1696,37 @@ async def test_cancelled_rebound_cleanup_finishes_before_later_owner(
                 )
                 assert await asyncio.wait_for(asyncio.to_thread(gated_finished.wait, 10), 11)
             await asyncio.wait_for(drain_background_tasks(state), 10)
+
+
+@pytest.mark.asyncio
+async def test_failed_empty_chat_private_grant_restores_protected_selection(tmp_path, monkeypatch):
+    """A failed first private grant must not commit the same-name member choice."""
+    state, slot, private_store = await asyncio.wait_for(
+        _template_chat(tmp_path, monkeypatch, first_turn=False), 20
+    )
+    key = "dashboard:template-chat"
+    protected = _selection_path(key).read_bytes()
+    prior = (slot.agent, slot.memory_store, slot._memory_assignment_from_history)
+    state.sessions.reset = AsyncMock(return_value=True)
+
+    async def fail_grant(_state, session_key, agent_name, cfg):
+        assert session_key == key
+        assert agent_name == TEMPLATE
+        assert cfg.agents[agent_name].memory_store == private_store
+        assert session_agent_selection_kind(key, TEMPLATE) == "member"
+        raise OSError("private grant unavailable")
+
+    pin = AsyncMock(side_effect=fail_grant)
+    monkeypatch.setattr(chat_handlers, "pin_private_agent_store", pin)
+    async with TestClient(TestServer(as_owner(_make_app_with_agent_routes(state)))) as client:
+        response = await asyncio.wait_for(
+            client.post(f"/api/chat/slots/{slot.key}/agent", json={"agent": TEMPLATE}), 10
+        )
+        assert response.status == 503, await response.text()
+
+    pin.assert_awaited_once()
+    assert (slot.agent, slot.memory_store, slot._memory_assignment_from_history) == prior
+    assert _selection_path(key).read_bytes() == protected
+    assert session_agent_selection_kind(key, TEMPLATE) == "template"
+    assert state.conversation_log.get_metadata(key)["agent"] == TEMPLATE
+    assert read_private_session_store(key) is None
